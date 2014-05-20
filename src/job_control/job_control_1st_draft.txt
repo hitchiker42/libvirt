@@ -1,0 +1,66 @@
+  My name is Tucker DiNapoli and I am working on implementing job control for
+the storage driver for the google summer of code, the first step in doing this
+is creating and implementing a unified api for job control.
+
+   These are my ideas for a job control api to unifiy job control code currently
+in libxl and qemu and to be used in implementing job control in the storage
+driver.
+
+  Most of the basic ideas of the api will be taken from the way that job
+control is currently implemented in the qemu driver, the code for which is
+located in qemu_domain.{c,h}.
+
+  The idea behind job control is being able to run, control and monitor
+background jobs in a domain. Optionally asynchronous jobs can be supported
+(async jobs are supported in the qemu driver but not the libxl driver). Async
+jobs are jobs which support other jobs being run at the same time, the types of
+jobs allowed during an async job is decided by a mask of job types. This model 
+
+There will be an enum for job types based on the job types in both libxl and
+qemu. The basic job types will be: None, no job running; query, job doesn't
+modify the domain/storage pool; modify, job may modify the domain/storage
+pool;and destroy, job will destroy the domain/storage pool. If there any other
+reasonable types they can be added.
+
+
+  Since I am ultimately going to be implementing job control in the storage
+driver I am going to implement everything internally in terms of a job object.
+I would like to add this object as a field in the virDomainObj struct as well
+as the virStoragePoolObj so that job control can work independently of
+domains/storage type (unless there is a better place to put these).
+
+The api will consist of several generic types of functions, which will be
+implemented internally using job objects as much as possible, but will have
+different functions to act on domains and on storage pools (unless there is
+some way to have functions which could act on both domains and storage pools,
+I'm still new to libvirt so I'm not sure if there is).
+
+Here is a generic list of the functions I intend to include in the api.
+-BeginJob; start a synchronous background job
+-BeginAsyncJob; start an asynchronous background job
+-EndJob; complete a synchronous job, must be called at some point after calling
+BeginJob
+-EndAsyncJob; the same as above, but for asynchronous jobs
+
+-InitJob; initialize a job object
+-FreeJob; free the resources associated with a job object
+
+-AbortJob; Cancel the currently running synchronous job, waits for the job to
+ finish before returning
+-AbortAsyncJob; Cancel an asynchronous job, the job will not necessarily be
+ stopped when this returns
+
+-SetAsyncJobMask; set the mask of jobs allowed during an asynchronous job.
+
+Questions I have:
+  The qemu implementation has a function BeginNestedJob, to start a normal job
+during an async job. I'm not sure if this is necessary or not.
+  Currently there are functions virDomainGetJobInfo and virDomainGetJobStats,
+these use a struct virDomainJobInfo, I'm not sure if I should merge this with
+the new job object I'm creating, or leave it as a separate object (if I do
+leave it as a separate structure it will still be in a field in the new job
+object) 
+  I'm not sure if the job object should contain a field for private data. If
+there is one it ties the job object somewhat to a specific domain/storage pool,
+but having one adds more flexibility.
+
