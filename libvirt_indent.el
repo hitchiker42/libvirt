@@ -1,0 +1,28 @@
+;; -*- lexical-binding: t; -*-
+(defun libvirt-indent-statements (&optional start end)
+  (interactive "r")
+
+  ;;if only one argument is passed ignore it
+  (if (null end) (setq start (point-min) end (point-max)))
+  (goto-char start)
+  (while (re-search-forward "\\(if\\|for\\|while\\) ?(\\(.*\\)) ?{" end t)
+    (replace-match "\\1 (\\2) {" t)))
+(defun libvirt-indent-commas (&optional start end)
+  (interactive "r")
+  (if (null end) (setq start (point-min) end (point-max)))
+  (while (re-search-forward ",\\([^\n ]\\)" end t)
+    (replace-match ", \\1" t)))
+(defun libvirt-indent-equals (&optional start end)
+  (interactive "r")
+  (if (null end) (setq start (point-min) end (point-max)))
+  (while (re-search-forward "\\([a-zA-Z0-9_]\\) ?\\([-+*/^&|><=]?=\\) ?\\([a-zA-Z0-9_]\\)" end t)
+    (replace-match "\\1 \\2 \\3")))
+
+(defun libvirt-indent (&optional start end)
+  (interactive "r")
+  (if (null end) (setq start (point-min) end (point-max)))
+  (libvirt-indent-statements start end)
+  (goto-char start)
+  (libvirt-indent-commas start end)
+  (goto-char start)
+  (libvirt-indent-equals start end))

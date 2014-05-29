@@ -118,6 +118,7 @@ UTIL_SOURCES =							\
 		util/virinitctl.c util/virinitctl.h		\
 		util/viriptables.c util/viriptables.h		\
 		util/viriscsi.c util/viriscsi.h			\
+		util/virjobcontrol.h util/virjobcontrol.c	\
 		util/virjson.c util/virjson.h			\
 		util/virkeycode.c util/virkeycode.h		\
 		util/virkeyfile.c util/virkeyfile.h		\

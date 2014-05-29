@@ -20,219 +20,382 @@
  * Author: Tucker DiNapoli
  */
 
+#include <config.h>
+
 #include "virjobcontrol.h"
+#include "viralloc.h"
+#include "virtime.h"
 
-int virJobObjInit(virJobObjPtr job){
-    /* global job id, kept inside the function to prevent it
-       from being modified elsewhere */
-    static unsigned int id=0;
+#define vir_alloc virAlloc
+#define VIR_ALLOC_SIZE(ptr, size) vir_alloc(&ptr, size, true, VIR_FROM_THIS, \
+                                          __FILE__, __FUNCTION__, __LINE__)
+#define VIR_ALLOC_SIZE_QUIET(ptr, size) vir_alloc(&ptr, size, 0, 0, 0, 0, 0)
 
-    /* Increment the id atomicially because multiple jobs can be 
-       initialized at the same time, this doesn't check for overflow
-       I don't know if it should or not*/
-    job->id=virAtomicIntInc(&id);
+#define GEN_JOB_ID_WRAPPER_FUNC(action)        \
+    int virJobID##action(virJobID id){         \
+        virJobObjPtr job = virJobFromIDInternal(id);      \
+        return virJobObj##action(job);                 \
+    }
+#define GEN_JOB_ID_WRAPPER_FUNC_2(action, arg_type_)    \
+    int virJobID##action(virJobID id, arg_type arg){    \
+        virJobObjPtr job = virJobFromIDInternal(id);      \
+        return virJobObj##action(job, arg);            \
+    }
+#define LOCK_JOB(job)                           \
+    virMutexLock(&job->lock)
+#define UNLOCK_JOB(job)                         \
+    virMutexUnlock(&job->lock)
 
-    if (virCondInit(&job->cond) < 0){
+#define CHECK_FLAG_ATOMIC(job, flag) (virAtomicIntGet(&job->flags) & VIR_JOB_FLAG_##flag)
+#define CHECK_FLAG(job, flag) (job->flags & VIR_JOB_FLAG_##flag)
+#define SET_FLAG_ATOMIC(job, flag) (virAtomicIntOr(&job->flags, VIR_JOB_FLAG_##flag))
+#define SET_FLAG(job, flag) (job->flags |= VIR_JOB_FLAG_##flag)
+#define UNSET_FLAG_ATOMIC(job, flag) (virAtomicIntAnd(&job->flags, (~VIR_JOB_FLAG_##flag)))
+#define UNSET_FLAG(job, flag) (job->flags &= (~VIR_JOB_FLAG_##flag))
+#define CLEAR_FLAGS_ATOMIC(job) (virAtomicIntSet(&job->flags, VIR_JOB_FLAG_NONE))
+#define CLEAR_FLAGS(job) (job->flags = VIR_JOB_FLAG_NONE)
+
+
+/* This is a lazy way of doing thing but it'll work for getting somethings running
+   and testable and because this is private it won't break anything when I change it*/
+typedef struct _jobAlistEntry {
+    virJobID id;
+    virJobObjPtr job;
+    struct _jobAlistEntry *next;
+} jobAlistEntry;
+
+typedef struct {
+    jobAlistEntry *head;
+    jobAlistEntry *tail;
+    virRWLock *lock;  /*this seems like an unecessary wrapper*/
+} jobAlist;
+
+static inline void*
+virAllocSize(size_t size)
+{
+    void *ptr;
+    if (vir_alloc(&ptr, size, 0, 0, 0, 0, 0) < 0) {
+        return NULL;
+    }
+    return ptr;
+}
+
+static jobAlist *job_alist;
+
+static jobAlistEntry*
+alistLookup(const jobAlist *alist, virJobID id)
+{
+    virRWLockRead(alist->lock);
+    jobAlistEntry *retval = NULL;
+    jobAlistEntry *job_entry = alist->head;
+    do {
+        if (job_entry->id == id) {
+            retval = job_entry;
+            break;
+        }
+    } while ((job_entry = job_entry->next));
+    virRWLockUnlock(alist->lock);
+    return retval;
+}
+
+/* add job the list of currently existing jobs, job should
+   have already been initialized via virJobObjInit.
+   returns 0 if job is already in the alist,
+   returns the id of the job if it was successfully added
+   returns -1 on error.
+
+   job id's use unsigned ints so we need to return a long
+   to fit all possible job id's
+ */
+static long
+jobAlistAdd(jobAlist *alist, virJobObjPtr job)
+{
+    virJobID id = job->id;
+    if (alistLookup(alist, id)) {
+        return 0;
+    }
+    virRWLockWrite(alist->lock);
+    jobAlistEntry *new_entry = virAllocSize(sizeof(jobAlistEntry));
+    if (!new_entry) {
         return -1;
+    }
+    *new_entry = (jobAlistEntry) {.id = id, .job = job};
+    alist->tail->next = new_entry;
+    alist->tail = new_entry;
+    virRWLockUnlock(alist->lock);
+    return id;
+}
+
+/* Remove the job with id id from the list of currently existing jobs,
+   this doesn't free/cleanup the actual job object, it just removes
+   the list entry, this is called by virJobObjFree, so there shouldn't
+   be any reason to call it directly.
+
+   return values are the same as for jobAlist add, 0 if no job found,
+   job id on success, -1 on some other error;
+*/
+static long
+jobAlistRemove(jobAlist *alist, virJobID id)
+{
+    jobAlistEntry *entry = alist->head;
+    /*we can't just call alistLookup because we need the entry before the one
+      we want to free*/
+    /* It seems excessive to do a read lock here then get a write lock later*/
+    virRWLockWrite(alist->lock);
+    do {
+        if (entry->next->id == id) {
+            break;
+        }
+    } while ((entry = entry->next));
+
+    if (!entry) {
+        return 0;
+    }
+    VIR_FREE(entry->next);
+    virRWLockUnlock(alist->lock);
+    return id;
+}
+
+/* global job id
+
+   Because it gets incremented before it's first use 0 is
+   never a valid job id
+
+   it is possible this should be volatile
+*/
+static unsigned int global_id = 0;
+
+static inline virJobID
+jobIDFromJobInternal(virJobObjPtr job)
+{
+    return job->id;
+}
+
+
+static inline virJobObjPtr
+jobFromIDInternal(virJobID id)
+{
+    jobAlistEntry *entry = alistLookup(job_alist, id);
+    if (entry) {
+        return entry->job;
+    } else {
+        return NULL;
     }
 }
 
-int virJobObjFree(virJobObjPtr job){
-    virCondDestroy(&job->cond);
-}
-/*not sure how this will work yet*/
-virJobID jobIDfromJobInternal(virJobObjPtr job);
-virJobObjPtr jobfromJobIDInternal(virJobID id);
+virJobObjPtr
+virJobFromID(virJobID id)
+{
+    return jobFromIDInternal(id);
 
+}
+virJobID
+virJobIDFromJob(virJobObjPtr job)
+{
+    return jobIDFromJobInternal(job);
+}
+
+/*should probably take an argument for initial flags*/
+int
+virJobObjInit(virJobObjPtr job)
+{
+    /* This code would check to see if job was already initialized,
+       I don't know if this is needed.
+       if (job->id != 0) {
+         return 0;
+       }
+    */
+    job->id = virAtomicIntInc(&global_id);
+    job->maxJobsWaiting = INT_MAX;
+
+    if (virCondInit(&job->cond) < 0) {
+        return -1;
+    }
+
+    if (virMutexInit(&job->lock) < 0) {
+        virCondDestroy(&job->cond);
+        return -1;
+    }
+
+    jobAlistAdd(job_alist, job);
+
+    return job->id;
+}
+
+void
+virJobObjFree(virJobObjPtr job)
+{
+    virCondDestroy(&job->cond);
+    jobAlistRemove(job_alist, job->id);
+    VIR_FREE(job);
+}
+
+void
+virJobObjCleanup(virJobObjPtr job)
+{
+    virCondDestroy(&job->cond);
+    jobAlistRemove(job_alist, job->id);
+}
 
 int
-virDomainObjInitJob(virDomainJobObjPtr dom)
+virJobObjBegin(virJobObjPtr job,
+               virJobType type)
 {
-    memset(&dom->job, 0, sizeof(dom->job));
-    /*no need for a goto error in code this short*/
-    if (virCondInit(&priv->job.cond) < 0){
-        return -1;
-    }
-    if (virCondInit(&priv->job.asyncCond) < 0) {
-        virCondDestroy(&priv->job.cond);
-        return -1;
-    }
-    return 0;
-}
-void
-virDomainObjFreeJob(virDomainObjPtr dom)
-{
-    virCondDestroy(&dom->job.cond);
-    virCondDestroy(&dom->job.asyncCond);
-}
-/*I imagine since this is static I don't need to worry abount naming it
-  something complicated
- */
-static void resetJob(virJobObjPtr job)
-{
-    job->active=VIR_JOB_NONE;
-    job->owner=0;
-}
-static void resetAsyncJob(virJobObjPtr job)
-{
-    job->asyncJob=VIR_JOB_NONE;
-    job->asyncOwner=0;
-}
-static void virJobObjResetAsyncJob(virJobObjPtr job);
-static int virDomainObjBeginJobInternal(virDomainObjPtr dom,
-                                        virDomainJobObjPtr job,
-                                        enum virDomainJobType job_type,
-                                        bool async){
+    LOCK_JOB(job);
+    /*This should ultimately do more then this */
     unsigned long long now;
-    unsigned long long then;
+    if (job->id <= 0) {
+        goto error; /* job wasn't initialiazed*/
+    }
     if (virTimeMillisNow(&now) < 0) {
+        goto error;
+    }
+    job->type = type;
+    SET_FLAG(job, ACTIVE);
+    job->start = now;
+    job->owner = virThreadSelfID();
+    return job->id;
+ error:
+    UNLOCK_JOB(job);
+    return -1;
+}
+
+int
+virJobObjEnd(virJobObjPtr job)
+{
+    if (job->type == VIR_JOB_NONE) {
         return -1;
     }
-    
-    /* currently libxl and qemu have macros for job wait time, so this field 
-     will need to be added, Probably as part of the job object*/
-    then = now + job->jobWaitTime;
+    virJobObjReset(job);
+    virCondSignal(&job->cond);
 
-    virObjRef(dom);
-    
-    /* wait for the current job to finish*/
-    while (job->active) {
-        VIR_DEBUG("Wait normal job condition for starting job: %s",
-                  virDomainJobTypeToString(job_type));
-        if (virCondWaitUntil(&job->cond, &dom->parent.lock, then) < 0){
+    return job->id;
+}
+
+int
+virJobObjReset(virJobObjPtr job)
+{
+    LOCK_JOB(job);
+    job->type = VIR_JOB_NONE;
+    job->flags = VIR_JOB_FLAG_NONE;
+    job->owner = 0;
+    /*should clear the number of waiters?*/
+    job->jobsWaiting = 0;
+    UNLOCK_JOB(job);
+
+    return job->id;
+}
+
+int
+virJobObjAbort(virJobObjPtr job)
+{
+    LOCK_JOB(job);
+    SET_FLAG(job, ABORTED);
+    UNLOCK_JOB(job);
+    return job->id;
+}
+
+/* lock should be held by the calling function*/
+int
+virJobObjWait(virJobObjPtr job,
+              virMutexPtr lock,
+              unsigned long long limit)
+{
+    int retval;
+    if (CHECK_FLAG(job, ACTIVE)) { /* if the job isn't active we're fine*/
+        if (virAtomicIntInc(&job->jobsWaiting) > job->maxJobsWaiting) {
+            errno = 0;
+            goto error;
+        }
+        while (CHECK_FLAG(job, ACTIVE)) {
+            if (limit) {
+                retval = virCondWaitUntil(&job->cond, lock, limit);
+            } else {
+                retval = virCondWait(&job->cond, lock);
+            }
+            if (retval < 0) {
+                goto error;
+            }
+        }
+    }
+    virAtomicIntDec(&job->jobsWaiting);
+    return job->id;
+
+ error:
+    virAtomicIntDec(&job->jobsWaiting);
+    if (!errno) {
+        return -3;
+    } else if (errno == ETIMEDOUT) {
+        return -2;
+    } else {
+        return -1;
+    }
+}
+#if 0
+int
+virJobObjWaitAlt(virJobObjPtr job,
+              virMutexPtr lock,
+              unsigned long long limit)
+{
+    int retval;
+    while (CHECK_FLAG(job, ACTIVE)) {
+        if (limit) {
+            retval = virCondWaitUntil(&job->cond, lock, limit);
+        } else {
+            retval = virCondWait(&job->cond, lock);
+        }
+        if (retval < 0) {
             goto error;
         }
     }
+    return job->id;
 
-
-
-/*this presumably isn't necessary since EndJob will reset the job */
-    resetJob(job);
-    if (!async){
-        /*TODO: debug message*/
-        job->active=job_type;
-        job->owner=virThreadSelfID();
-    } else {
-        /*TODO: debug message*/
-        virJobObjResetAsyncJob(job);
-        job->asyncJob=job_type;
-        /*this is what the qemu code does, presumably it's close 
-          enough to the current time*/
-        job->start=now; 
-    }
-    return 0;
  error:
-    /*TODO: warning message*/
-    if (errno == ETIMEDOUT){
-        virReportError(VIR_ERR_OPERATION_TIMEOUT,
-                       "%s", _("cannot acquire state change lock"));
+    if (errno == ETIMEDOUT) {
+        return -2);
     } else {
-        virReportSystemError(errno,
-                             "%s", _("cannot acquire job mutex"));
+        return -1;
     }
-
-    virObjectUnref(obj);
-    return -1;
-    
 }
-int virDomainObjBeginAsyncJob(virDomainObjPtr dom,
-                              enum virDomainJobType job)
+#endif
+
+int
+virJobObjSuspend(virJobObjPtr job)
 {
-    virDomainJobObjPtr obj;
-    if (!(obj=virDomainObjGetJobObj(dom))){
-        return -1;
-    }
-    if (!obj->asyncAllowed){
-        return -1;
-    }
-    if (virDomainObjBeginJobInternal(dom,obj,job,1) <0 ){
-        return -1;
-    } else {
+    LOCK_JOB(job);
+    SET_FLAG(job, SUSPENDED);
+    UNSET_FLAG(job, ACTIVE);
+    UNLOCK_JOB(job);
+    return job->id;
+}
+void
+virJobObjSetMaxWaiters(virJobObjPtr job, int max)
+{
+    virAtomicIntSet(&job->maxJobsWaiting, max);
+}
+
+bool
+virJobObjCheckAbort(virJobObjPtr job)
+{
+    return CHECK_FLAG(job, ABORTED);
+}
+bool
+virJobActive(virJobObjPtr job)
+{
+    return CHECK_FLAG(job, ACTIVE);
+}
+/* since we need to be able to return a negitive answer on error
+   the time difference we can return is somewhat limited, but
+   not in any significant way*/
+long long
+virJobObjCheckTime(virJobObjPtr job)
+{
+    if (!job->start) {
         return 0;
     }
+    unsigned long long now;
+    if (virTimeMillisNow(&now) < 0) {
+        return -1;
+    }
+    return now - job->start;
 }
-int virDomainObjBeginJob(virDomainObjPtr dom,
-                         enum virDomainJobType job)
-{
-    virDomainJobObjPtr obj;
-    if (!(obj=virDomainObjGetJobObj(dom))){
-        return -1;
-    }
-    if (virDomainObjBeginJobInternal(dom,obj,job,0) <0 ){
-        return -1;
-    } else {
-        return 0;
-    }
-}
-int virDomainEndJob(virDomainObjPtr dom)
-{e
-    virDomainJobObjPtr job;
-    if (!(job=virDomainObjGetJobObj(dom))){
-        return -1;
-    }
-    if (job->active == VIR_JOB_NONE){
-        return -1;
-    }
-/* may or may not be necessary
-    if(job->owner != virThreadSelfId()){
-        return -1;
-    }
-*/
-    /*TODO: debug message*/
-    resetJobObj(job);
-    virCondSignal(&job->cond);
-
-    return virObjectUnref(dom);
-}
-
-int virDomainEndAsyncJob(virDomainObjPtr dom)
-{
-    virDomainJobObjPtr job;
-    if (!(job=virDomainObjGetJobObj(dom))){
-        return -1;
-    }
-    if (job->active == VIR_JOB_NONE){
-        return -1;
-    }
-    /*TODO: debug message*/
-    resetJob(job);
-    virCondSignal(&job->cond);
-
-    return virObjectUnref(dom);
-}
-
-    
-/*
-  usage idea
-{
-    // some variables declaration
-
-    if (!(vm = qemuDomObjFromDomain(dom)))
-        return -1;
-
-    // some preparation here
-
-    if (qemuDomainObjBeginJob(driver, vm, QEMU_JOB_MODIFY) < 0)
-        goto cleanup;
-
-    if (!virDomainObjIsActive(vm)) {
-        virReportError(VIR_ERR_OPERATION_INVALID,
-                       "%s", _("domain is not running"));
-        goto endjob;
-    }
-
-    // Some actual work here
-
-    ret = 0;
-
-endjob:
-    if (!qemuDomainObjEndJob(driver, vm))
-        vm = NULL;
-
-cleanup:
-    if (vm)
-        virObjectUnlock(vm);
-    // More of cleanup work here
-    return ret;
-}
- */

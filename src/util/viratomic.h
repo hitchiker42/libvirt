@@ -66,6 +66,17 @@ VIR_STATIC void virAtomicIntSet(volatile int *atomic,
  */
 VIR_STATIC int virAtomicIntInc(volatile int *atomic)
     ATTRIBUTE_NONNULL(1);
+/**
+ * virAtomicIntInc:
+ * Decrements the value of atomic by 1.
+ *
+ * Think of this operation as an atomic version of
+ * { *atomic -= 1; return *atomic; }
+ *
+ * This call acts as a full compiler and hardware memory barrier.
+ */
+VIR_STATIC int virAtomicIntDec(volatile int *atomic)
+    ATTRIBUTE_NONNULL(1);
 
 /**
  * virAtomicIntDecAndTest:
@@ -176,6 +187,12 @@ VIR_STATIC unsigned int virAtomicIntXor(volatile unsigned int *atomic,
             (void)(0 ? *(atomic) ^ *(atomic) : 0);                      \
             __sync_add_and_fetch((atomic), 1);                          \
         }))
+#  define virAtomicIntDec(atomic)                                       \
+    (__extension__ ({                                                   \
+            (void)verify_true(sizeof(*(atomic)) == sizeof(int));        \
+            (void)(0 ? *(atomic) ^ *(atomic) : 0);                      \
+            __sync_add_and_fetch((atomic), -1);                         \
+        }))
 #  define virAtomicIntDecAndTest(atomic)                                \
     (__extension__ ({                                                   \
             (void)verify_true(sizeof(*(atomic)) == sizeof(int));        \
@@ -250,6 +267,11 @@ static inline int
 virAtomicIntInc(volatile int *atomic)
 {
     return InterlockedIncrement((volatile LONG *)atomic);
+}
+static inline int
+virAtomicIntDec(volatile int *atomic)
+{
+    return InterlockedDecrement((volatile LONG *)atomic);
 }
 
 static inline bool
@@ -329,6 +351,17 @@ virAtomicIntInc(volatile int *atomic)
 
     pthread_mutex_lock(&virAtomicLock);
     value = ++(*atomic);
+    pthread_mutex_unlock(&virAtomicLock);
+
+    return value;
+}
+static inline int
+virAtomicIntInc(volatile int *atomic)
+{
+    int value;
+
+    pthread_mutex_lock(&virAtomicLock);
+    value = --(*atomic);
     pthread_mutex_unlock(&virAtomicLock);
 
     return value;
@@ -436,6 +469,8 @@ virAtomicIntXor(volatile unsigned int *atomic,
     virAtomicIntSet((int *)atomic, val)
 #  define virAtomicIntInc(atomic)               \
     virAtomicIntInc((int *)atomic)
+#  define virAtomicIntDec(atomic)               \
+    virAtomicIntDec((int *)atomic)
 #  define virAtomicIntDecAndTest(atomic)        \
     virAtomicIntDecAndTest((int *)atomic)
 #  define virAtomicIntCompareExchange(atomic, oldval, newval)   \
