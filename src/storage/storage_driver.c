@@ -1690,6 +1690,7 @@ storageVolCreateXML(virStoragePoolPtr obj,
         int buildret;
 
         /* Drop the pool lock during volume allocation */
+        /* JOB CONTROL HERE */
         pool->asyncjobs++;
         voldef->building = 1;
         virStoragePoolObjUnlock(pool);
@@ -1855,8 +1856,11 @@ storageVolCreateXMLFrom(virStoragePoolPtr obj,
         pool->volumes.count--;
         goto cleanup;
     }
-
+    /* Job Control Here */
     /* Drop the pool lock during volume allocation */
+    /*
+      virJobID job = virStorageBeginJob(pool, VIR_JOB_MODIFY, VIR_JOB_ASYNC);
+    */
     pool->asyncjobs++;
     newvol->building = 1;
     origvol->in_use++;
@@ -1879,6 +1883,8 @@ storageVolCreateXMLFrom(virStoragePoolPtr obj,
     newvol->building = 0;
     allocation = newvol->target.allocation;
     pool->asyncjobs--;
+    /* virStorageEndJob(pool, job);
+     */
 
     if (origpool) {
         origpool->asyncjobs--;

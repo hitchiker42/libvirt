@@ -20,6 +20,13 @@
  * Author: Tucker DiNapoli
  */
 
+/* Things that still need to be done,
+   Completing the api for getting/updating job info.
+   Create a generic way to manage multiple jobs (the way I manage jobs for
+   domains in virdomjobcontrol.c/h is done for compatability)
+   Write tests
+*/
+
 #ifndef __JOB_CONTROL_H__
 #define __JOB_CONTROL_H__
 
@@ -47,6 +54,8 @@ typedef enum {
     VIR_JOB_DESTROY  = 0x4, /* job will destroy the domain/storage/object it is acting on */
     VIR_JOB_LAST
 } virJobType;
+const char *virJobTypeToString(virJobType type);
+int virJobTypeFromString(const char *type);
 
 /* General metadata/flags for jobs
 
@@ -62,7 +71,7 @@ typedef enum {
     /* These next flags are used to indicate how progress should be measured */
     VIR_JOB_FLAG_TIME_BOUND    = 0x002, /* Job is bound by a specific ammount of time */
     VIR_JOB_FLAG_MEM_BOUND     = 0x004, /* Job is bound by a specific ammount of memory */
-    VIR_JOB_FLAG_FILES_BOUND   = 0x008, /* Job is bound by a specific number of files */
+    VIR_JOB_FLAG_FILE_BOUND    = 0x008, /* Job is bound by a specific number of files */
     VIR_JOB_FLAG_DATA_BOUND    = 0x010, /* Job is bound by a specific ammount of data */
     VIR_JOB_FLAG_UNBOUNDED     = 0x020, /* Job has no specific bound */
     VIR_JOB_FLAG_SUSPENDED     = 0x040, /* Job is Suspended and can be resumed   */
@@ -72,30 +81,15 @@ typedef enum {
     VIR_JOB_FLAG_LAST          = 0x400
 } virJobFlag;
 
-typedef unsigned int virJobID;
+const char *virJobFlagToString(virJobType type);
+int virJobFromString(const char *type);
+
+typedef int virJobID; /*signed so negitive values can be returned on error*/
 typedef struct _virJobObj virJobObj;
 typedef virJobObj *virJobObjPtr;
 typedef struct _virJobInfo virJobInfo;
 typedef virJobInfo *virJobInfoPtr;
 
-
-/*VIR_ENUM_IMPL(virJobType, VIR_JOB_LAST,
-              "none",
-              "query",
-              "modify",
-              "destroy");
-*/
-/*
-VIR_ENUM_IMPL(virJobState, VIR_JOB_STATE_LAST,
-   "none" ,
-   "bounded" ,
-   "unbounded" ,
-   "suspended" ,
-   "completed" ,
-   "failed" ,
-   "cancelled" ,
-   "last");
-*/
 struct _virJobObj {
     /* this should only be locked when changing the job object, not while running a job
        it's use is mostly optional, but it is needed for waiting on a job*/
@@ -113,8 +107,18 @@ struct _virJobObj {
     virJobFlag flags; /* The current state of the job */
     void *privateData;
 };
+
+typedef enum {
+    VIR_JOB_INFO_NONE = 0,
+    VIR_JOB_INFO_TIME,
+    VIR_JOB_INFO_MEM,
+    VIR_JOB_INFO_FILE,
+    VIR_JOB_INFO_DATA,
+    VIR_JOB_INFO_LAST
+} virJobInfoType;
 struct _virJobInfo {
     /*these fields are for monitoring estimated completion*/
+    virMutex lock; /* seperate locks for the job and job info */
     double percentComplete; /*easy access to simple progress */
     unsigned long long estTimeRemaining;
     unsigned long long timeStamp;
@@ -160,43 +164,229 @@ struct _virJobInfo {
     unsigned long long timeRemaining;
 };
 
+/* this is an idea for a way of managing an arbitrary number of jobs */
+struct _virJobControlObj {
+    virJobObj *jobs;
+    virJobID *running; /* currently running */
+    virJobID *suspended; /* not currently running, but not finished */
+    virJobID *finished; /* Job is finished, either do to an error or
+                           because it was completed */
+    /* sizes of allocated memory */
+    int jobs_size; /* size of jobs array */
+    int running_size;
+    int suspended_size;
+    int finished_size;
+
+    /* number of active entries in arrays */
+    int num_jobs;
+    int num_jobs_running; /* number of jobs running */
+    int num_jobs_suspended;
+    int num_jobs_finished;
+
+    virMutex lock;
+    unsigned long long job_mask;
+};
 /*main functions*/
 /*this should take a mask of features*/
+/**
+ * virJobObjInit:
+ * @job: Pointer to the job object to initialize
+ *
+ * Initialize the job object given, should be called before any other
+ * job function.
+ *
+ * Like all job functions it returns the job id on success and -1 on error
+ */
 int virJobObjInit(virJobObjPtr job);
+/**
+ * virJobObjFree:
+ * @job: Pointer to the job object to free
+ *
+ * Cleanup/free all resources/memory assoicated with job
+ */
 void virJobObjFree(virJobObjPtr job);
+/**
+ * virJobObjCleanup:
+ * @job: Pointer to the job object to cleanup
+ *
+ * Cleanup all resources assoicated with job, and zero out the
+ * corrsponding memory, but do not free it.
+ */
+
 void virJobObjCleanup(virJobObjPtr job);
+/**
+ * virJobObjBegin:
+ * @job: The job to begin
+ * @type: The type of job that is being started
+ *
+ * Marks job as active, sets the calling thread as the owner of the job,
+ * sets the job's start time to the current time and sets it's type to type.
+ *
+ * End job should be called after this, once the job is done
+ *
+ * Returns the job id of job on success, 0 if job is already active
+ * and -1 on error.
+ */
 int virJobObjBegin(virJobObjPtr job,
                    virJobType type);
+/**
+ * virJobObjEnd:
+ *
+ * @job: The job to end
+ *
+ * Ends job, calls virJobObjReset and signals all threads waiting on job.
+ *
+ * Ending a job does not invalidate the job object, and a new job can be
+ * started using the same job object, call virJobObjFree or virJobObjCleanup
+ * in order to destroy a job object.
+ *
+ * returns the job's id on success and -1 if the job was not active.
+ */
 int virJobObjEnd(virJobObjPtr job);
+/**
+ * virJobObjReset:
+ *
+ * @job: The job to reset
+ *
+ * Clears all fields of job related to running a job. This does not
+ * clear the job id, any configurable parameters (currently just the
+ * maximum number of waiting threads), or the mutex/condition variable
+ * assoicated with the job. This is called internally by virJobObjEnd
+ * and there should be few reasons to call this explicitly.
+ */
 int virJobObjReset(virJobObjPtr job);
-void virJobObjAbort(virJobObjPtr job);
+/**
+ * virJobObjAbort:
+ * @job: The job to abort
+ *
+ * Marks job as aborted, since jobs are asyncronous this doesn't actually
+ * stop the job. The abort status of a job can be checked by
+ * virJobObjCheckAbort. A suspended job can be aborted.
+ *
+ * returns the job id on success and -1 if
+ * job is not currently running/suspended.
+ */
+int virJobObjAbort(virJobObjPtr job);
+/**
+ * virJobObjAbort:
+ * @job: The job to abort/signal waiters
+ *
+ * Behaves identically to virJobObjAbort except all threads waiting
+ * on job are signaled after the abort status is set.
+ */
+int virJobObjAbortAndSignal(virJobObjPtr job);
+/**
+ * virJobObjSuspend:
+ * @job: The job to suspend
+ *
+ * Marks job as suspended, it is up to the caller of the function
+ * to actually save any state assoicated with the job
+ *
+ * This function returns the job's id on success and -1 if the job
+ * was not active.
+ */
 int virJobObjSuspend(virJobObjPtr job);
+/**
+ * virJobObjResume:
+ * @job The job to resume
+ *
+ * Resume job, as with virJobObjSuspend it is up to the caller to
+ * insure that the work being done by job is actually restarted.
+ *
+ * Since a job can be aborted while it is suspended the caller should
+ * check to see if job has been aborted, a convenience function
+ * virJobObjResumeIfNotAborted is provided.
+ *
+ * returns the job id if job was resumed and -1 if the job was not suspended.
+ */
 int virJobObjResume(virJobObjPtr job);
 
+/**
+ * virJobObjResumeIfNotAborted:
+ * @job The job to resume
+ *
+ * Behaves the same as virJobObjResume except it returns 0 and does not
+ * resume the job if the job was aborted while suspended.
+ */
+int virJobObjResumeIfNotAborted(virJobObjPtr job);
+
 /* returns -3 if max waiters is exceeded, -2 on timeout, -1 on other error*/
+/**
+ * virJobObjWait:
+ * @job: The job to wait on
+ * @lock: The lock to use in the call to virCondWait
+ * @limit: If not 0 the maximum ammount of time to wait (in milliseconds)
+ *
+ * This function waits for job to be completed, or to otherwise signal on it's
+ * condition variable.
+ *
+ * If lock is NULL the internal job lock will be used, otherwise lock should
+ * be held by the calling thread.
+ * (NOTE: I'm not sure if it's a good idea or not to use the internal lock)
+ *
+ * If limit is > 0 virCondWaitUntil is called instead of virCondWait with limit
+ * being used as the time parameter.
+ *
+ * If job is not currently active return successfully.
+ *
+ * Like all job functions returns the job's id on success.
+ *
+ * On Failure returns a negitive number to indicate the cause of failure
+ * -3 indicates the maximum number of threads were alread waiting on job
+ * -2 indicates that virCondWaitUntil timed out
+ * -1 indicates some other error in virCondWait/virCondWaitUntil
+ */
 int virJobObjWait(virJobObjPtr job,
                   virMutexPtr lock,
                   unsigned long long limit);
-/*waits on the job's lock*/
-int virJobObjWait2(virJobObjPtr job,
-                  unsigned long long limit);
+/* Should I provide a function to wait for a suspended job to resume? */
+
+/**
+ * virJobObjSignal:
+ * @job: The job to signal from
+ * @all: If true signal all waiting threads, otherwise just signal one
+ *
+ * Signal a thread/threads waiting on job. In most cases waiting threads
+ * are signaled when needed internally, but this is provided if for
+ * some reason waiting threads need to be manually signaled.
+ */
+
+void virJobObjSignal(virJobObjPtr job, bool all);
 
 /* accessor functions*/
-extern inline bool virJobObjCheckAbort(virJobObjPtr job);
+/**
+ * virJobObjCheckAbort:
+ * @job: The job whoes status should be checked
+ *
+ * Returns true if job has been aborted, false otherwise
+ */
+bool virJobObjCheckAbort(virJobObjPtr job);
+/**
+ * virJobObjCheckTime:
+ * @job: The job whoes time should be checked
+ *
+ * Returns the time in milliseconds that job has been running for.
+ * returns 0 if job is not active and -1 if there is an error in
+ * getting the current time.
+ */
 long long virJobObjCheckTime(virJobObjPtr job);
-extern inline bool virJobActive(virJobObjPtr job);
+/**
+ * virJobObjActive:
+ * @job: The job whoes status should be checked
+ *
+ * Returns true if job is currently active, false otherwise
+ */
+bool virJobObjActive(virJobObjPtr job);
+/**
+ * virJobObjSetMaxWaiters:
+ * @job: The job to modify
+ * @max: The maximum number of threads to allow to wait on job at once
+ *
+ * Sets the maximum number of threads that can simultaneously wait on job.
+ * By default there is essentially no limit (in reality the limit is the
+ * maximum value that can be held by an int)
+ */
 void virJobObjSetMaxWaiters(virJobObjPtr job, int max);
-
-/*
-int virJobIDInit(virJobID id);
-int virJobIDFree(virJobID id);
-int virJobIDBegin(virJobID id, virJobType type);
-int virJobIDEnd(virJobID id);
-int virJobIDReset(virJobID id);
-int virJobIDAbort(virJobID id);
-int virJobIDSuspend(virJobID id);
-*/
-
 
 virJobObjPtr virJobFromID(virJobID id);
 virJobID virJobIDFromJob(virJobObjPtr job);

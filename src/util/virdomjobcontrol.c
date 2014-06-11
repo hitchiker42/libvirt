@@ -27,21 +27,15 @@
 #define MASK_CLEAR(dom_job) (dom_job->mask=0)
 #define MASK_SET(dom_job, val) (dom_job->mask|=val)
 #define MASK_UNSET(dom_job, val) (dom_job->mask&=(~val))
-#define MASK_CHECK(dom_job, val) (dom_job->mask & val)
+#define MASK_CHECK_SET(dom_job, val) (dom_job->mask & val)
+#define MASK_CHECK_UNSET(dom_job, val) (dom_job->mask ^ val)
+
 
 #define LOCK_DOM_JOB(dom_job)                   \
     virMutexLock(&dom_job->lock)
 #define UNLOCK_DOM_JOB(dom_job)                 \
     virMutexUnlock(&dom_job->lock)
 
-#define vir_alloc virAlloc
-static inline void*
-virAllocSize(size_t size)
-{
-    void *ptr;
-    vir_alloc(&ptr, size, 0, 0, 0, 0, 0);
-    return ptr;
-}
 int
 virDomainObjJobObjInit(virDomainObjPtr dom,
                        virDomainJobObjPtr dom_job,
@@ -91,7 +85,7 @@ static inline int
 wait_for_current_job_completion(virDomainJobObjPtr dom_job)
 {
  restart:
-    if (virJobActive(dom_job->current_job)) {
+    if (virJobObjActive(dom_job->current_job)) {
         if (dom_job->num_jobs_queued >= dom_job->max_queued_jobs) {
             goto error;
         }
@@ -104,7 +98,7 @@ wait_for_current_job_completion(virDomainJobObjPtr dom_job)
         }
         dom_job->num_jobs_queued--;
     }
-    if (virJobActive(dom_job->current_job)) {
+    if (virJobObjActive(dom_job->current_job)) {
         goto restart;
     }
     return 1;
@@ -113,13 +107,13 @@ wait_for_current_job_completion(virDomainJobObjPtr dom_job)
 }
 
 int
-virDomainObjStartJobInternal(virDomainJobObjPtr dom_job, virJobType type)
+virDomainObjBeginJob(virDomainJobObjPtr dom_job, virJobType type)
 {
     LOCK_DOM_JOB(dom_job);
     int retval;
  retry:
     /* wait for current non-async job to finish */
-    if (virJobActive(dom_job->current_job)) {
+    if (virJobObjActive(dom_job->current_job)) {
         if (virJobObjWait(&dom_job->current_job,
                           &dom_job->lock,
                           dom_job->waitLimit) < 0){
@@ -138,7 +132,7 @@ virDomainObjStartJobInternal(virDomainJobObjPtr dom_job, virJobType type)
         }
     }
     /* it's possible another job started before us */
-    if (virJobActive(dom_job->current_job) || type ^dom_job->mask) {
+    if (virJobObjActive(dom_job->current_job) || type ^dom_job->mask) {
         goto retry;
     }
     if ((retval = virJobBegin(dom_job->current_job, type)) < 0) {
@@ -153,29 +147,33 @@ virDomainObjStartJobInternal(virDomainJobObjPtr dom_job, virJobType type)
 }
 
 int
-virDomainObjStartAsyncJob(virDomainJobObjPtr dom_job,
-                              int mask,
+virDomainObjBeginAsyncJob(virDomainJobObjPtr dom_job,
                               virJobType type)
 {
     LOCK_DOM_JOB(dom_job);
+    /* Set mask conservatively by default */
+    int mask = 0;
+    if (type == VIR_JOB_QUERY) {
+        mask |= VIR_JOB_QUERY;
+    }
     /* wait for the async job to finish first */
  retry:
-    if (virJobActive(dom_job->async_job)) {
+    if (virJobObjActive(dom_job->async_job)) {
         if (virJobObjWait(dom_job->async_job,
                           dom_job->lock,
                           dom_job->waitLimit) < 0) {
             goto error;
         }
     }
-    if (virJobActive(dom_job->current_job)) {
+    if (virJobObjActive(dom_job->current_job)) {
         if (virJobObjWait(dom_job->current_job,
                           dom_job->lock,
                           dom_job->waitLimit) < 0) {
             goto error;
         }
     }
-    if (virJobActive(dom_job->async_job) ||
-        virJobActive(dom_job->current_job)) {
+    if (virJobObjActive(dom_job->async_job) ||
+        virJobObjActive(dom_job->current_job)) {
         goto retry;
     }
     dom_job->mask = mask;
@@ -211,6 +209,16 @@ virDomainObjAbortAsyncJob(virDomainJobObjPtr dom_job)
     LOCK_DOM_JOB(dom_job);
     virJobObjAbort(dom_job->async_job);
     UNLOCK_DOM_JOB(dom_job);
+}
+bool
+virDomainObjJobAllowed(virDomainJobObjPtr dom_job,
+                       virJobType type)
+{
+    LOCK_DOM_JOB(dom_job);
+    bool retval = !(virJobObjActive(dom_job->current_job)) &&
+        MASK_CHECK_SET(dom_job, type);
+    UNLOCK_DOM_JOB(dom_job);
+    return retval;
 }
 
 /*

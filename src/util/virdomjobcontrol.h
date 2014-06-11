@@ -22,6 +22,12 @@
 
 
 #include "virjobcontrol.h"
+/* This Code in intended to be used to replace the current job control
+   code in the qemu and libxl drivers. The current job control internals
+   should be able to be replaced with with calls to these functions, which
+   will simplify job control, but also avoid modifying any code that uses
+   the current job control functions
+*/
 
 /*these need to be able to form a mask*/
 enum virDomainJobFeatures {
@@ -32,31 +38,15 @@ enum virDomainJobFeatures {
     VIR_DOM_JOB_LAST
 };
 struct _virDomainJobObj {
-    virDomainObjPtr dom;
+/*    virDomainObjPtr dom;*/
     virMutex lock;
-    virCond cond;
-#if 0
-    /* the complicated generic way*/
-    /* I'm using a virJobObj* instead of a virJobObjPtr to emphasize
-       that this is an array*/
-    virJobObj *jobs; /* all jobs in the domain (the actual job objects) */
-    virJobID *jobs_running; /* jobs currently running */
-    int num_jobs; /* number of total jobs*/
-    int jobs_allocated; /* size of the jobs array*/
-    int num_jobs_running; /* number of jobs running */
-#else
-    /* the eaiser way*/
     virJobObj current_job;
     virJobObj async_job;
-#endif
-/* for now only one non async job can be run at one time */
+/* for now only one non async job can be run at one time
+   (which is all qemu allows anyway) */
     unsigned long long mask; /* what jobs can be started currently */
     unsigned long long waitLimit; /* how long to wait on conition variables*/
 
-    int num_jobs_queued; /* number of jobs waiting to run,
-                            but not allowed because of the mask */
-    int max_queued_jobs; /* The maximum number of jobs that can be queued
-                            at one time*/
     enum virDomainJobFeatures features;
 };
 
@@ -67,16 +57,15 @@ typedef virDomainJobObj *virDomainJobObjPtr;
 int virDomainObjJobObjInit(virDomainJobObjPtr dom_job);
 void virDomainObjJobObjFree(virDomainJobObjPtr dom_job);
 
-virJobID virDomainObjStartJob(virDomainJobObjPtr dom_job,
+virJobID virDomainObjBeginJob(virDomainJobObjPtr dom_job,
                            virJobType type);
-virJobID virDomainObjStartAsyncJob(virDomainJobObjPtr dom_job,
-                                   int mask,
+virJobID virDomainObjBeginAsyncJob(virDomainJobObjPtr dom_job,
                                    virJobType type);
 int virDomainObjEndJob(virDomainJobObjPtr dom_job);
 int virDomainObjEndAsyncJob(virDomainJobObjPtr dom_job,
                             virJobID id);
 int virDomainObjAbortJob(virDomainJobObjPtr dom_job);
-int virDomainObjAborAsynctJob(virDomainJobObjPtr dom_job,
+int virDomainObjAbortAsynctJob(virDomainJobObjPtr dom_job,
                               virJobID id);
 
 virJobID virDomainObjSuspendJob(virDomainJobObjPtr dom_job);
@@ -86,3 +75,6 @@ int virDomainObjSetJobMask(virDomainJobObjPtr dom_job,
                            unsigned int job_mask);
 int virDomainObjJobAllowed(virDomainJobObjPtr dom_job,
                            virJobType type);
+void virDomainObjDisownAsyncJob(virDomainJobObjPtr dom_job);
+int virDomainObjSetJobWaitTimeout(virDomainJobObjPtr dom_job,
+                                  unsigned long long timeout);
