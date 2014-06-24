@@ -2912,6 +2912,7 @@ virStorageFileGetMetadataRecurse(virStorageSourcePtr src,
     ret = 0;
 
  cleanup:
+    VIR_FREE(buf);
     virStorageFileDeinit(src);
     virStorageSourceFree(backingStore);
     return ret;
