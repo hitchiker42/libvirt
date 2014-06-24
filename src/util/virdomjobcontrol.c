@@ -221,13 +221,28 @@ virDomainObjJobAllowed(virDomainJobObjPtr dom_job,
     return retval;
 }
 
-/*
-  suspend job
-  similar to endJob.
-  Need to figure out how to store suspended jobs
-
-*/
-/*
-  resume job
-  similar to start job
-*/
+int
+virDomainObjSuspendJob(virDomainJobOBjPtr dom_job)
+{
+    LOCK_DOM_JOB(dom_job);
+    int retval = virJobObjSuspend(dom_job->current_job);
+    UNLOCK_DOM_JOB(dom_job);
+    return retval;
+}
+int
+virDomainObjResumeJob(virDomainJobObjPtr dom_job,
+                          virJobID id)
+{
+    virJobObjPtr suspended_job = virJobFromId(id);
+    if (!suspended_job) {
+        return -1;
+    }
+    LOCK_DOM_JOB(dom_job);
+    wait_for_current_job_completion(dom_job);
+    int retval = virJobObjResumeIfNotAborted(suspended_job);
+    if (retval) {
+        dom_job->current_job = suspended_job;
+    }
+    UNLOCK_DOM_JOB(dom_job);
+    return retval;
+}

@@ -52,7 +52,7 @@ typedef enum {
     VIR_JOB_QUERY    = 0x1, /* job will not change domain state (read-only)*/
     VIR_JOB_MODIFY   = 0x2, /* job may change domain state (read-write)*/
     VIR_JOB_DESTROY  = 0x4, /* job will destroy the domain/storage/object it is acting on */
-    VIR_JOB_LAST
+    VIR_JOB_LAST = 4 /*needs to be explicitly set for VIR_ENUM_IMPL to work*/
 } virJobType;
 const char *virJobTypeToString(virJobType type);
 int virJobTypeFromString(const char *type);
@@ -78,7 +78,8 @@ typedef enum {
     VIR_JOB_FLAG_COMPLETED     = 0x080, /* Job has finished, but isn't cleaned up */
     VIR_JOB_FLAG_FAILED        = 0x100, /* Job hit error, but isn't cleaned up */
     VIR_JOB_FLAG_ABORTED       = 0x200, /* Job was aborted, but isn't cleaned up */
-    VIR_JOB_FLAG_LAST          = 0x400
+    VIR_JOB_FLAG_MAX           = 0x200, /* Keep set to the largest enum value */
+    VIR_JOB_FLAG_LAST          = 11 /* set to the number of enum values */
 } virJobFlag;
 
 const char *virJobFlagToString(virJobType type);
@@ -96,7 +97,7 @@ struct _virJobObj {
     virMutex lock;/*should have a compile time option to enable/disable locking */
     virCond cond; /* Use to coordinate jobs (is this necessary?) */
     virJobType type; /* The type of the job */
-    unsigned long long owner; /* Thread id which set current job */
+    unsigned long long owner; /* Thread id that owns current job */
     unsigned long long start; /* when the job started*/
     int jobsWaiting; /* number jobs waiting on cond */
     int maxJobsWaiting; /* max number of jobs that can wait on cond */
@@ -163,26 +164,19 @@ struct _virJobInfo {
     unsigned long long filesRemaining;
     unsigned long long timeRemaining;
 };
-
+struct virJobIDArray {
+    virJobID *ids;
+    int size;
+    int active;
+};
 /* this is an idea for a way of managing an arbitrary number of jobs */
 struct _virJobControlObj {
     virJobObj *jobs;
-    virJobID *running; /* currently running */
-    virJobID *suspended; /* not currently running, but not finished */
-    virJobID *finished; /* Job is finished, either do to an error or
-                           because it was completed */
-    /* sizes of allocated memory */
-    int jobs_size; /* size of jobs array */
-    int running_size;
-    int suspended_size;
-    int finished_size;
-
-    /* number of active entries in arrays */
-    int num_jobs;
-    int num_jobs_running; /* number of jobs running */
-    int num_jobs_suspended;
-    int num_jobs_finished;
-
+    virJobIDArray active; /* keeps track of the above array of jobs */
+    virJobIDArray running;
+    virJobIDArray suspended;
+    virJobIDArray finished;
+    
     virMutex lock;
     unsigned long long job_mask;
 };
@@ -387,6 +381,27 @@ bool virJobObjActive(virJobObjPtr job);
  * maximum value that can be held by an int)
  */
 void virJobObjSetMaxWaiters(virJobObjPtr job, int max);
+/**
+ * virJobObjChangeOwner:
+ * @job: the job to modify
+ * @id: the thread id of the new owner
+ *
+ * Change the owner of the given job to the thread with the given id.
+ * the thread id isn't checked in any way so it is up to the calling 
+ * function to insure that the thread id is valid 
+ */
+void virJobObjChangeOwner(virJobObjPtr job, unsigned long long id);
+
+/* These functions allow for the code using jobs to
+   work with extra job flags. This is seperate from job info
+   For all functions if the flag is not greater than VIR_JOB_LAST return -1.
+*/
+/* return true if flag changed and false if not */
+int virJobObjSetPrivateFlag(virJobObjPtr job, int flag);
+int virJobObjUnsetPrivateFlag(virJobObjPtr job, int flag);
+/* return true if flag set and false if not*/
+int virJobObjCheckPrivateFlag(virJobObjPtr job, int flag);
+
 
 virJobObjPtr virJobFromID(virJobID id);
 virJobID virJobIDFromJob(virJobObjPtr job);

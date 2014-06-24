@@ -46,9 +46,19 @@ enum libxlDomainJob {
 
     LIBXL_JOB_LAST
 };
+/*
+enum libxlDomainJob {
+    LIBXL_JOB_NONE = VIR_JOB_NONE,
+    LIBXL_JOB_QUERY = VIR_JOB_QUERY,
+    LIBXL_JOB_DESTROY = VIR_JOB_DESTROY,
+    LIBXL_JOB_MODIFY = VIR_JOB_MODIFY,
+
+    LIBXL_JOB_LAST = 4
+};
+ */
 VIR_ENUM_DECL(libxlDomainJob)
 
-
+p
 struct libxlDomainJobObj {
     virCond cond;                       /* Use to coordinate jobs */
     enum libxlDomainJob active;         /* Currently running job */
@@ -72,6 +82,7 @@ struct _libxlDomainObjPrivate {
     unsigned short migrationPort;
 
     struct libxlDomainJobObj job;
+    /* virDomainJobObj jobs;*/
 };
 
 

@@ -28,26 +28,6 @@
 #include "virlog.h"
 VIR_LOG_INIT("virjobcontrol");
 
-/* I'm confused by the vir alloc macros, I use them  but they just don't
-   make sense to me. I really don't like functions that
-   modify their arguments.
-*/
-/*
-#define vir_alloc virAlloc
-#define VIR_ALLOC_SIZE(ptr, size) vir_alloc(&ptr, size, true, VIR_FROM_THIS, \
-                                          __FILE__, __FUNCTION__, __LINE__)
-#define VIR_ALLOC_SIZE_QUIET(ptr, size) vir_alloc(&ptr, size, 0, 0, 0, 0, 0)
-static void*
-virAllocSize(size_t size)
-{
-    void *ptr;
-    if (vir_alloc(&ptr, size, 0, 0, 0, 0, 0) < 0) {
-        return NULL;
-    }
-    return ptr;
-}
-*/
-
 #define GEN_JOB_ID_WRAPPER_FUNC(action)        \
     int virJobID##action(virJobID id){         \
         virJobObjPtr job = virJobFromIDInternal(id);      \
@@ -74,10 +54,22 @@ virAllocSize(size_t size)
 
 #define CHECK_FLAG_ATOMIC(job, flag) (virAtomicIntGet(&job->flags) & VIR_JOB_FLAG_##flag)
 #define CHECK_FLAG(job, flag) (job->flags & VIR_JOB_FLAG_##flag)
+#define CHECK_FLAG_BY_VALUE(job, flag) (job->flags & flag)
+#define CHECK_FLAG_BY_VALUE_ATOMIC(job, flag)\
+    (virAtomicIntGet(&job->flags) & flag)
+
 #define SET_FLAG_ATOMIC(job, flag) (virAtomicIntOr(&job->flags, VIR_JOB_FLAG_##flag))
 #define SET_FLAG(job, flag) (job->flags |= VIR_JOB_FLAG_##flag)
+#define SET_FLAG_BY_VALUE(job, flag) (job->flags |= flag)
+#define SET_FLAG_BY_VALUE_ATOMIC(job, flag)\
+    (virAtomicIntOr(&job->flags, flag))
+
 #define UNSET_FLAG_ATOMIC(job, flag) (virAtomicIntAnd(&job->flags, (~VIR_JOB_FLAG_##flag)))
 #define UNSET_FLAG(job, flag) (job->flags &= (~VIR_JOB_FLAG_##flag))
+#define UNSET_FLAG_BY_VALUE(job, flag) (job->flags &= (~flag))
+#define UNSET_FLAG_BY_VALUE_ATOMIC(job, flag)\
+    (virAtomicIntAnd(&job->flags, (~flag)))
+
 #define CLEAR_FLAGS_ATOMIC(job) (virAtomicIntSet(&job->flags, VIR_JOB_FLAG_NONE))
 #define CLEAR_FLAGS(job) (job->flags = VIR_JOB_FLAG_NONE)
 typedef struct _jobHashEntry {
@@ -107,7 +99,7 @@ static struct _jobHash job_hash[];
 static int init_err=0;
 static virOnceControl job_once = VIR_ONCE_CONTROL_INITIALIZER;
 static void
-jobControlInit(void){    
+jobControlInit(void){
     if (virRWLockInit(&job_hash->lock) < 0) {
         init_err=1;
     }
@@ -306,98 +298,6 @@ jobHashRehash(jobHash *ht)
     VIR_FREE(old_table);
     return 1;
 }
-
-#if 0
-/* Preserved for posterity, at least for a little while */
-
-/* This is a lazy way of doing thing but it'll work for getting somethings running
-   and testable and because this is private it won't break anything when I change it*/
-typedef struct _jobAlistEntry {
-    virJobID id;
-    virJobObjPtr job;
-    struct _jobAlistEntry *next;
-} jobAlistEntry;
-
-typedef struct _jobAlist {
-    jobAlistEntry *head;
-    jobAlistEntry *tail;
-    virRWLock *lock;  /*this seems like an unecessary wrapper*/
-} jobAlist;
-
-static jobAlistEntry*
-alistLookup(const jobAlist *alist, virJobID id)
-{
-    virRWLockRead(alist->lock);
-    jobAlistEntry *retval = NULL;
-    jobAlistEntry *job_entry = alist->head;
-    do {
-        if (job_entry->id == id) {
-            retval = job_entry;
-            break;
-        }
-    } while ((job_entry = job_entry->next));
-    virRWLockUnlock(alist->lock);
-    return retval;
-}
-
-/* add job the list of currently existing jobs, job should
-   have already been initialized via virJobObjInit.
-   returns 0 if job is already in the alist,
-   returns the id of the job if it was successfully added
-   returns -1 on error.
-
-   job id's use unsigned ints so we need to return a long
-   to fit all possible job id's
- */
-static long
-jobAlistAdd(jobAlist *alist, virJobObjPtr job)
-{
-    virJobID id = job->id;
-    if (alistLookup(alist, id)) {
-        return 0;
-    }
-    virRWLockWrite(alist->lock);
-    jobAlistEntry *new_entry = virAllocSize(sizeof(jobAlistEntry));
-    if (!new_entry) {
-        return -1;
-    }
-    *new_entry = (jobAlistEntry) {.id = id, .job = job};
-    alist->tail->next = new_entry;
-    alist->tail = new_entry;
-    virRWLockUnlock(alist->lock);
-    return id;
-}
-
-/* Remove the job with id id from the list of currently existing jobs,
-   this doesn't free/cleanup the actual job object, it just removes
-   the list entry, this is called by virJobObjFree, so there shouldn't
-   be any reason to call it directly.
-
-   return values are the same as for jobAlist add, 0 if no job found,
-   job id on success, -1 on some other error;
-*/
-static long
-jobAlistRemove(jobAlist *alist, virJobID id)
-{
-    jobAlistEntry *entry = alist->head;
-    /*we can't just call alistLookup because we need the entry before the one
-      we want to free*/
-    /* It seems excessive to do a read lock here then get a write lock later*/
-    virRWLockWrite(alist->lock);
-    do {
-        if (entry->next->id == id) {
-            break;
-        }
-    } while ((entry = entry->next));
-
-    if (!entry) {
-        return 0;
-    }
-    VIR_FREE(entry->next);
-    virRWLockUnlock(alist->lock);
-    return id;
-}
-#endif
 
 /*inline versions for internal use, I'm not sure if there are specific
   rules for how to use inline in libvirt for portability */
@@ -671,6 +571,55 @@ virJobObjActive(virJobObjPtr job)
 {
     return CHECK_FLAG_ATOMIC(job, ACTIVE);
 }
+void
+virJobObjChangeOwner(virJobObjPtr job, unsigned long long id)
+{
+    /* can't do atomic operations on types bigger than an int */
+    LOCK_JOB(job);
+    job->owner=id;
+    UNLOCK_JOB(job);
+}
+
+#define INVALID_FLAG(x) ((x & (x-1) || (x <= VIR_JOB_FLAG_MAX))
+
+int
+virJobObjSetPrivateFlag(virJobObjPtr job, int flag)
+{
+    if (INVALID_FLAG(x)) {
+        return -1;
+    }
+    /* can't use atomic operations here without using
+       compare and swap, so just lock for simplicity */
+    LOCK_JOB(job);
+    int prev_flags = job->flag;
+    bool retval = (prev_flags == (SET_FLAG_BY_VALUE(job, flag)));
+    UNLOCK_JOB(job);
+    return retval;
+}
+int
+virJobObjUnsetPrivateFlag(virJobObjPtr job, int flag)
+{
+    if (INVALID_FLAG(x)) {
+        return -1;
+    }
+    /* can't use atomic operations here without using
+       compare and swap, so just lock for simplicity */
+    LOCK_JOB(job);
+    int prev_flags = job->flag;
+    bool retval = (prev_flags == (UNSET_FLAG_BY_VALUE(job, flag)));
+    UNLOCK_JOB(job);
+    return retval;
+}
+int
+virJobObjSetPrivateFlag(virJobObjPtr job, int flag)
+{
+    if (INVALID_FLAG(x)) {
+        return -1;
+    }
+    return CHECK_FLAG_BY_VALUE_ATOMIC(job, flag);
+}
+
+
 /* since we need to be able to return a negitive answer on error
    the time difference we can return is somewhat limited, but
    not in any significant way*/
@@ -879,3 +828,52 @@ virJobObjUpdateInfo(virJobObjPtr job,
     return job->id;
 }
 #endif
+
+static int
+virJobIDArrayInit(virJobIDArray *arr, int size)
+{
+    if (VIR_ALLOC_N_QUIET(arr->ids, size) < 0) {
+        return -1;
+    }
+    arr->size=size;
+    arr->active=0;
+    return 1;
+}
+/* managing multiple jobs */
+int
+virJobControlObjInit(virJobControlObjPtr jobs)
+{
+    if (VIR_ALLOC_QUIET(jobs) < 0) {
+        return -1;
+    }
+    if (virJobIDArrayInit(&jobs->active, 10) < 0) {
+        goto error;
+    }
+    if (virJobIDArrayInit(&jobs->running, 10) < 0) {
+        goto error;
+    }
+    if (virJobIDArrayInit(&jobs->suspended, 10) < 0) {
+        goto error;
+    }
+    if (virJobIDArrayInit(&jobs->finished, 10) < 0) {
+        goto error;
+    }
+    if (virMutexInit(jobs->lock) < 0 ) {
+        goto error;
+    }
+    jobs->jobs_size = jobs->running_size =
+        jobs->suspended_size = jobs->finished_size = 10;
+    return 1;
+    
+ error:
+    VIR_FREE(jobs->active.ids);
+    VIR_FREE(jobs->running.ids);
+    VIR_FREE(jobs->suspended.ids);
+    VIR_FREE(jobs->finished.ids);
+    VIR_FREE(jobs);
+    return -1;
+}
+int
+virJobControlStartNewJob(virJobControlObjPtr jobs)
+{
+    

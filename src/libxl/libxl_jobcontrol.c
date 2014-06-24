@@ -41,4 +41,32 @@ libxlDomainObjFreeJob(libxlDomainObjPrivatePtr priv)
 int
 libxlDomainObjBeginJob(libxlDriverPrivatePtr driver ATTRIBUTE_UNUSED,
                        virDomainObjPtr obj,
-                       virJobType job);
+                       virJobType job)
+{
+    libxlDomainObjPrivatePtr priv = obj->privateData;
+    virDomainJobObjPtr dom_job = &priv->jobs;
+    return virDomainObjBeginJob(dom_job, job);
+}
+bool
+libxlDomainObjEndJob(libxlDriverPrivatePtr driver ATTRIBUTE_UNUSED,
+                     virDomainObjPtr obj)
+{
+    libxlDomainObjPrivatePtr priv = obj->privateData;
+    virDomainJobObjPtr dom_job = &priv->jobs;
+    return virDomainObjEndJob(dom_job);
+}
+bool
+libxlDomainCleanupJob(libxlDriverPrivatePtr driver,
+                      virDomainObjPtr vm,
+                      virDomainShutoffReason reason)
+{
+    libxlDomainObjPrivatePtr priv = obj->privateData;
+    virDomainJobObjPtr dom_job = &priv->jobs;
+    if (virDomainObjBeginJob(dom_job, VIR_JOB_DESTROY) < 0 ) {
+        return true;
+    }
+    
+    libxlDomainCleanup(driver, vm, reason);
+
+    return virDomainObjEndJob(dom_job);
+}

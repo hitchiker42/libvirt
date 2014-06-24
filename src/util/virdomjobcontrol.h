@@ -50,7 +50,7 @@ struct _virDomainJobObj {
     enum virDomainJobFeatures features;
 };
 
-typedef struct _virDomainJobObj virDomainJobObjh;
+typedef struct _virDomainJobObj virDomainJobObj;
 typedef virDomainJobObj *virDomainJobObjPtr;
 
 /* should all of these take a virDomainJobObjPtr as a first argument?*/
@@ -62,13 +62,19 @@ virJobID virDomainObjBeginJob(virDomainJobObjPtr dom_job,
 virJobID virDomainObjBeginAsyncJob(virDomainJobObjPtr dom_job,
                                    virJobType type);
 int virDomainObjEndJob(virDomainJobObjPtr dom_job);
-int virDomainObjEndAsyncJob(virDomainJobObjPtr dom_job,
-                            virJobID id);
+int virDomainObjEndAsyncJob(virDomainJobObjPtr dom_job);
+/*                            virJobID id);*/
 int virDomainObjAbortJob(virDomainJobObjPtr dom_job);
-int virDomainObjAbortAsynctJob(virDomainJobObjPtr dom_job,
-                              virJobID id);
+int virDomainObjAbortAsyncJob(virDomainJobObjPtr dom_job);
+/*                              virJobID id);*/
 
 virJobID virDomainObjSuspendJob(virDomainJobObjPtr dom_job);
+/* returns -1 if id doesn't corrspont to an actual job,
+   Waits for current job to finish.
+   If the suspended job was aborted returns 0
+   otherwise resume the suspended job, make it
+   the current job and return the job id.
+*/
 int virDomainObjResumeJob(virDomainJobObjPtr dom_job,
                           virJobID id);
 int virDomainObjSetJobMask(virDomainJobObjPtr dom_job,
@@ -76,5 +82,6 @@ int virDomainObjSetJobMask(virDomainJobObjPtr dom_job,
 int virDomainObjJobAllowed(virDomainJobObjPtr dom_job,
                            virJobType type);
 void virDomainObjDisownAsyncJob(virDomainJobObjPtr dom_job);
+void virDomainObjTransferJob(virDomainJobObjPtr dom_job);
 int virDomainObjSetJobWaitTimeout(virDomainJobObjPtr dom_job,
                                   unsigned long long timeout);
