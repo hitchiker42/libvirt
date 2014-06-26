@@ -119,6 +119,7 @@ UTIL_SOURCES =							\
 		util/viriptables.c util/viriptables.h		\
 		util/viriscsi.c util/viriscsi.h			\
 		util/virjobcontrol.h util/virjobcontrol.c	\
+		util/virdomjobcontrol.h util/virdomjobcontrol.c	\
 		util/virjson.c util/virjson.h			\
 		util/virkeycode.c util/virkeycode.h		\
 		util/virkeyfile.c util/virkeyfile.h		\
@@ -710,7 +711,8 @@ LIBXL_DRIVER_SOURCES =						\
 		libxl/libxl_conf.c libxl/libxl_conf.h		\
 		libxl/libxl_domain.c libxl/libxl_domain.h       \
 		libxl/libxl_driver.c libxl/libxl_driver.h       \
-		libxl/libxl_migration.c libxl/libxl_migration.h
+		libxl/libxl_migration.c libxl/libxl_migration.h \
+		libxl/libxl_jobcontrol.c
 
 UML_DRIVER_SOURCES =						\
 		uml/uml_conf.c uml/uml_conf.h			\

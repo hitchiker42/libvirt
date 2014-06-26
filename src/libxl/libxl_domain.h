@@ -29,6 +29,7 @@
 # include "domain_conf.h"
 # include "libxl_conf.h"
 # include "virchrdev.h"
+# include "Virdomjobcontrol.h"
 
 # define JOB_MASK(job)                  (1 << (job - 1))
 # define DEFAULT_JOB_MASK               \
@@ -38,15 +39,15 @@
 /* Only 1 job is allowed at any time
  * A job includes *all* libxl.so api, even those just querying
  * information, not merely actions */
-enum libxlDomainJob {
-    LIBXL_JOB_NONE = 0,      /* Always set to 0 for easy if (jobActive) conditions */
-    LIBXL_JOB_QUERY,         /* Doesn't change any state */
-    LIBXL_JOB_DESTROY,       /* Destroys the domain (cannot be masked out) */
-    LIBXL_JOB_MODIFY,        /* May change state */
+/* enum libxlDomainJob { */
+/*     LIBXL_JOB_NONE = 0,      /\* Always set to 0 for easy if (jobActive) conditions *\/ */
+/*     LIBXL_JOB_QUERY,         /\* Doesn't change any state *\/ */
+/*     LIBXL_JOB_DESTROY,       /\* Destroys the domain (cannot be masked out) *\/ */
+/*     LIBXL_JOB_MODIFY,        /\* May change state *\/ */
 
-    LIBXL_JOB_LAST
-};
-/*
+/*     LIBXL_JOB_LAST */
+/* }; */
+
 enum libxlDomainJob {
     LIBXL_JOB_NONE = VIR_JOB_NONE,
     LIBXL_JOB_QUERY = VIR_JOB_QUERY,
@@ -55,10 +56,10 @@ enum libxlDomainJob {
 
     LIBXL_JOB_LAST = 4
 };
- */
+
 VIR_ENUM_DECL(libxlDomainJob)
 
-p
+
 struct libxlDomainJobObj {
     virCond cond;                       /* Use to coordinate jobs */
     enum libxlDomainJob active;         /* Currently running job */
@@ -81,8 +82,8 @@ struct _libxlDomainObjPrivate {
     libxlDriverPrivatePtr driver;
     unsigned short migrationPort;
 
-    struct libxlDomainJobObj job;
-    /* virDomainJobObj jobs;*/
+    /* struct libxlDomainJobObj job; */
+    virDomainJobObj jobs;
 };
 
 

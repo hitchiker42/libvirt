@@ -296,6 +296,7 @@ static const libxl_osevent_hooks libxl_event_callbacks = {
     .timeout_deregister = libxlDomainObjTimeoutDeregisterEventHook,
 };
 
+#if 0
 static int
 libxlDomainObjInitJob(libxlDomainObjPrivatePtr priv)
 {
@@ -319,7 +320,7 @@ libxlDomainObjResetJob(libxlDomainObjPrivatePtr priv)
 static void
 libxlDomainObjFreeJob(libxlDomainObjPrivatePtr priv)
 {
-    ignore_value(virCondDestroy(&priv->job.cond));
+    virDomainObjJobObjCleanup(priv->jobs);
 }
 
 /* Give up waiting for mutex after 30 seconds */
@@ -408,7 +409,7 @@ libxlDomainObjEndJob(libxlDriverPrivatePtr driver ATTRIBUTE_UNUSED,
 
     return virObjectUnref(obj);
 }
-
+#endif
 static void *
 libxlDomainObjPrivateAlloc(void)
 {
@@ -425,7 +426,8 @@ libxlDomainObjPrivateAlloc(void)
         return NULL;
     }
 
-    if (libxlDomainObjInitJob(priv) < 0) {
+    if (virDomainObjJobObjInit(priv->jobs, false, 
+                               INT_MAX, LIBXL_JOB_WAIT_TIME) < 0) {
         virChrdevFree(priv->devs);
         virObjectUnref(priv);
         return NULL;

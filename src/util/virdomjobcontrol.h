@@ -22,6 +22,8 @@
 
 
 #include "virjobcontrol.h"
+#include "internal.h"
+#include "domain_conf.h"
 /* This Code in intended to be used to replace the current job control
    code in the qemu and libxl drivers. The current job control internals
    should be able to be replaced with with calls to these functions, which
@@ -31,11 +33,11 @@
 
 /*these need to be able to form a mask*/
 enum virDomainJobFeatures {
-    VIR_DOM_JOB_UNSUPPORTED,
-    VIR_DOM_JOB_SUPPORTED,
-    VIR_DOM_JOB_ASYNC,
-    VIR_DOM_JOB_SUSPEND,
-    VIR_DOM_JOB_LAST
+    VIR_DOM_JOB_UNSUPPORTED = 0,
+    VIR_DOM_JOB_SUPPORTED = 1,
+    VIR_DOM_JOB_ASYNC = (VIR_DOM_JOB_SUPPORTED << 1),
+    VIR_DOM_JOB_SUSPEND = (VIR_DOM_JOB_ASYNC << 1),
+    VIR_DOM_JOB_LAST = 4
 };
 struct _virDomainJobObj {
 /*    virDomainObjPtr dom;*/
@@ -54,8 +56,13 @@ typedef struct _virDomainJobObj virDomainJobObj;
 typedef virDomainJobObj *virDomainJobObjPtr;
 
 /* should all of these take a virDomainJobObjPtr as a first argument?*/
-int virDomainObjJobObjInit(virDomainJobObjPtr dom_job);
+int virDomainObjJobObjInitDefault(virDomainJobObjPtr dom_job);
+int virDomainObjJobObjInit(virDomainJobObjPtr dom_job,
+                           bool asyncAllowed,
+                           int maxQueuedJobs,
+                           unsigned long long condWaitTime);
 void virDomainObjJobObjFree(virDomainJobObjPtr dom_job);
+void virDomainObjJobObjCleanup(virDomainJobObjPtr dom_job);
 
 virJobID virDomainObjBeginJob(virDomainJobObjPtr dom_job,
                            virJobType type);
@@ -79,7 +86,7 @@ int virDomainObjResumeJob(virDomainJobObjPtr dom_job,
                           virJobID id);
 int virDomainObjSetJobMask(virDomainJobObjPtr dom_job,
                            unsigned int job_mask);
-int virDomainObjJobAllowed(virDomainJobObjPtr dom_job,
+bool virDomainObjJobAllowed(virDomainJobObjPtr dom_job,
                            virJobType type);
 void virDomainObjDisownAsyncJob(virDomainJobObjPtr dom_job);
 void virDomainObjTransferJob(virDomainJobObjPtr dom_job);

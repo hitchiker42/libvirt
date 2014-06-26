@@ -54,9 +54,8 @@ typedef enum {
     VIR_JOB_DESTROY  = 0x4, /* job will destroy the domain/storage/object it is acting on */
     VIR_JOB_LAST = 4 /*needs to be explicitly set for VIR_ENUM_IMPL to work*/
 } virJobType;
-const char *virJobTypeToString(virJobType type);
+const char *virJobTypeToString(int type);
 int virJobTypeFromString(const char *type);
-
 /* General metadata/flags for jobs
 
    more specific flags can be added for speciic drivers,
@@ -108,7 +107,7 @@ struct _virJobObj {
     virJobFlag flags; /* The current state of the job */
     void *privateData;
 };
-
+#if 0
 typedef enum {
     VIR_JOB_INFO_NONE = 0,
     VIR_JOB_INFO_TIME,
@@ -176,10 +175,11 @@ struct _virJobControlObj {
     virJobIDArray running;
     virJobIDArray suspended;
     virJobIDArray finished;
-    
+
     virMutex lock;
     unsigned long long job_mask;
 };
+#endif
 /*main functions*/
 /*this should take a mask of features*/
 /**
@@ -372,6 +372,23 @@ long long virJobObjCheckTime(virJobObjPtr job);
  */
 bool virJobObjActive(virJobObjPtr job);
 /**
+ * virJobObjJobType:
+ * @job: The job to get the type of
+ *
+ * returns the job type of job.
+ */
+virJobType virJobObjJobType(virJobObjPtr job);
+/**
+ * virJobObjJobType:
+ * @job: The job to change the type of
+ * @type: The new type of job
+ *
+ * Changes the job type of a currently running/suspended job.
+ *
+ */
+/* Should this return an error if job isn't active*/
+void virJobObjSetJobType(virJobObjPtr job, virJobType type);
+/**
  * virJobObjSetMaxWaiters:
  * @job: The job to modify
  * @max: The maximum number of threads to allow to wait on job at once
@@ -387,8 +404,8 @@ void virJobObjSetMaxWaiters(virJobObjPtr job, int max);
  * @id: the thread id of the new owner
  *
  * Change the owner of the given job to the thread with the given id.
- * the thread id isn't checked in any way so it is up to the calling 
- * function to insure that the thread id is valid 
+ * the thread id isn't checked in any way so it is up to the calling
+ * function to insure that the thread id is valid
  */
 void virJobObjChangeOwner(virJobObjPtr job, unsigned long long id);
 
@@ -405,4 +422,14 @@ int virJobObjCheckPrivateFlag(virJobObjPtr job, int flag);
 
 virJobObjPtr virJobFromID(virJobID id);
 virJobID virJobIDFromJob(virJobObjPtr job);
+
+/* Macro(s) to access fields quickly in actual structs (i.e not pointers).
+   Considering how often it needs to be known if a job is active or not this
+   should be worthwhile. (I imagine the complier could optimize away the function
+   calls, but it would need the function definations, which would require
+   link-time-optimization or whole program compilation.
+*/
+#define VIR_JOB_OBJ_ACTIVE(obj) (virAtomicIntGet(&obj.flags) & VIR_JOB_FLAG_ACTIVE)
+#define VIR_JOB_OBJ_CHECK_ABORT(obj) (virAtomicIntGet(&obj.flags) & VIR_JOB_FLAG_ABORTED)
+
 #endif

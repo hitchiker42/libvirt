@@ -22,13 +22,14 @@
 #include <config.h>
 
 #include "virdomjobcontrol.h"
+#include "viralloc.h"
 
 #define MASK_FILL(dom_job) (dom_job->mask=-1)
 #define MASK_CLEAR(dom_job) (dom_job->mask=0)
 #define MASK_SET(dom_job, val) (dom_job->mask|=val)
 #define MASK_UNSET(dom_job, val) (dom_job->mask&=(~val))
-#define MASK_CHECK_SET(dom_job, val) (dom_job->mask & val)
-#define MASK_CHECK_UNSET(dom_job, val) (dom_job->mask ^ val)
+#define MASK_CHECK(dom_job, val) (dom_job->mask & val)
+
 
 
 #define LOCK_DOM_JOB(dom_job)                   \
@@ -37,73 +38,56 @@
     virMutexUnlock(&dom_job->lock)
 
 int
-virDomainObjJobObjInit(virDomainObjPtr dom,
-                       virDomainJobObjPtr dom_job,
+virDomainObjJobObjInit(virDomainJobObjPtr dom_job,
                        bool asyncAllowed,
                        int maxQueuedJobs,
                        unsigned long long condWaitTime)
 {
     if (virMutexInit(&dom_job->lock) < 0) {
-        goto error_1;
+        goto error;
     }
-    if (virCondInit(&dom_job->cond) < 0) {
-        goto error_2;
+    if (virJobObjInit(&dom_job->current_job) <= 0) {
+        virMutexDestroy(&dom_job->lock);
+        goto error;
     }
-    if (virJobInit(&dom_job->current_job) <= 0) {
-        goto error_3;
+
+    virJobObjSetMaxWaiters(&dom_job->current_job, maxQueuedJobs);
+
+    if (asyncAllowed) {
+        dom_job->features |= VIR_DOM_JOB_ASYNC;
+        if (virJobObjInit(&dom_job->async_job) <= 0) {
+            virJobObjCleanup(&dom_job->current_job);
+            virMutexDestroy(&dom_job->lock);
+            goto error;
+        }
+        virJobObjSetMaxWaiters(&dom_job->async_job, maxQueuedJobs);
     }
-    if (virJobInit(&dom_job->async_job) <= 0) {
-        goto error_4;
-    }
-    dom_job->dom = dom;
-    dom_job->async_allowed = asyncAllowed;
+
     dom_job->waitLimit = condWaitTime;
+
+
     return 0;
-    /*I have four different error conditions, this is the eaisest way to do this*/
- error_4:
-    virJobCleanup(&dom_job->current_job);
- error_3:
-    virCondDestroy(&dom_job->cond);
- error_2:
-    virMutexDestroy(&dom_job->lock);
- error_1:
+
+ error:
     return -1;
 
 }
 void
 virDomainObjJobObjFree(virDomainJobObjPtr dom_job)
 {
-    virCondDestroy(&dom_job->cond);
     virMutexDestroy(&dom_job->lock);
-    virJobCleanup(&dom_job->current_job);
-    virJobCleanup(&dom_job->async_job);
+    virJobObjCleanup(&dom_job->current_job);
+    virJobObjCleanup(&dom_job->async_job);
 
     VIR_FREE(dom_job);
 }
-/* dom_job should be locked by the calling function*/
-static inline int
-wait_for_current_job_completion(virDomainJobObjPtr dom_job)
+
+void
+virDomainObjJobObjCleanup(virDomainJobObjPtr dom_job)
 {
- restart:
-    if (virJobObjActive(dom_job->current_job)) {
-        if (dom_job->num_jobs_queued >= dom_job->max_queued_jobs) {
-            goto error;
-        }
-        dom_job->num_jobs_queued++;
-        if (virJobObjWait(&dom_job->current_job,
-                          &dom_job->lock,
-                          dom_job->waitLimit) < 0){
-            dom_job->num_jobs_queued--;
-            goto error;
-        }
-        dom_job->num_jobs_queued--;
-    }
-    if (virJobObjActive(dom_job->current_job)) {
-        goto restart;
-    }
-    return 1;
- error:
-    return -1;
+    virMutexDestroy(&dom_job->lock);
+    virJobObjCleanup(&dom_job->current_job);
+    virJobObjCleanup(&dom_job->async_job);
 }
 
 int
@@ -113,7 +97,7 @@ virDomainObjBeginJob(virDomainJobObjPtr dom_job, virJobType type)
     int retval;
  retry:
     /* wait for current non-async job to finish */
-    if (virJobObjActive(dom_job->current_job)) {
+    if (VIR_JOB_OBJ_ACTIVE(dom_job->current_job)) {
         if (virJobObjWait(&dom_job->current_job,
                           &dom_job->lock,
                           dom_job->waitLimit) < 0){
@@ -132,10 +116,10 @@ virDomainObjBeginJob(virDomainJobObjPtr dom_job, virJobType type)
         }
     }
     /* it's possible another job started before us */
-    if (virJobObjActive(dom_job->current_job) || type ^dom_job->mask) {
+    if (VIR_JOB_OBJ_ACTIVE(dom_job->current_job) || type ^dom_job->mask) {
         goto retry;
     }
-    if ((retval = virJobBegin(dom_job->current_job, type)) < 0) {
+    if ((retval = virJobObjBegin(&dom_job->current_job, type)) < 0) {
         goto error;
     }
     UNLOCK_DOM_JOB(dom_job);
@@ -148,7 +132,7 @@ virDomainObjBeginJob(virDomainJobObjPtr dom_job, virJobType type)
 
 int
 virDomainObjBeginAsyncJob(virDomainJobObjPtr dom_job,
-                              virJobType type)
+                          virJobType type)
 {
     LOCK_DOM_JOB(dom_job);
     /* Set mask conservatively by default */
@@ -158,91 +142,147 @@ virDomainObjBeginAsyncJob(virDomainJobObjPtr dom_job,
     }
     /* wait for the async job to finish first */
  retry:
-    if (virJobObjActive(dom_job->async_job)) {
-        if (virJobObjWait(dom_job->async_job,
-                          dom_job->lock,
+    if (VIR_JOB_OBJ_ACTIVE(dom_job->async_job)) {
+        if (virJobObjWait(&dom_job->async_job,
+                          &dom_job->lock,
                           dom_job->waitLimit) < 0) {
             goto error;
         }
     }
-    if (virJobObjActive(dom_job->current_job)) {
-        if (virJobObjWait(dom_job->current_job,
-                          dom_job->lock,
+    if (VIR_JOB_OBJ_ACTIVE(dom_job->current_job)) {
+        if (virJobObjWait(&dom_job->current_job,
+                          &dom_job->lock,
                           dom_job->waitLimit) < 0) {
             goto error;
         }
     }
-    if (virJobObjActive(dom_job->async_job) ||
-        virJobObjActive(dom_job->current_job)) {
+    if (VIR_JOB_OBJ_ACTIVE(dom_job->async_job) ||
+        VIR_JOB_OBJ_ACTIVE(dom_job->current_job)) {
         goto retry;
     }
     dom_job->mask = mask;
-    if ((retval = virJobObjBegin(dom_job->async_job, type) < 0)) {
+    int retval;
+    if ((retval = virJobObjBegin(&dom_job->async_job, type) < 0)) {
         goto error;
     }
     UNLOCK_DOM_JOB(dom_job);
     return retval;
  error:
     UNLOCK_DOM_JOB(dom_job);
-    return -1
+    return -1;
 }
 int
 virDomainObjEndJob(virDomainJobObjPtr dom_job)
 {
     LOCK_DOM_JOB(dom_job);
-    virJobObjEnd(dom_job->current_job);
+    int retval = virJobObjEnd(&dom_job->current_job);
     UNLOCK_DOM_JOB(dom_job);
-    return 0;
+    return retval;
 }
 int
 virDomainObjEndAsyncJob(virDomainJobObjPtr dom_job)
 {
     LOCK_DOM_JOB(dom_job);
-    virJobObjEnd(dom_job->async_job);
+    int retval = virJobObjEnd(&dom_job->async_job);
     UNLOCK_DOM_JOB(dom_job);
-    return 0;
+    return retval;
 }
 
 int
 virDomainObjAbortAsyncJob(virDomainJobObjPtr dom_job)
 {
     LOCK_DOM_JOB(dom_job);
-    virJobObjAbort(dom_job->async_job);
+    int retval = virJobObjAbort(&dom_job->async_job);
     UNLOCK_DOM_JOB(dom_job);
+    return retval;
 }
 bool
 virDomainObjJobAllowed(virDomainJobObjPtr dom_job,
                        virJobType type)
 {
     LOCK_DOM_JOB(dom_job);
-    bool retval = !(virJobObjActive(dom_job->current_job)) &&
-        MASK_CHECK_SET(dom_job, type);
+    bool retval = !(VIR_JOB_OBJ_ACTIVE(dom_job->current_job)) &&
+        MASK_CHECK(dom_job, type);
     UNLOCK_DOM_JOB(dom_job);
     return retval;
 }
 
 int
-virDomainObjSuspendJob(virDomainJobOBjPtr dom_job)
+virDomainObjSuspendJob(virDomainJobObjPtr dom_job)
 {
+/* Normally all non async jobs use the same job object, which is fine
+   but when a job is suspended a new job object needs to be created.
+   If any part of this function fails the current job is restored
+   and the return value indicates the error:
+   -1 allocation failure,
+   -2 error initializing new job object,
+   -3 error suspending job.
+*/
     LOCK_DOM_JOB(dom_job);
-    int retval = virJobObjSuspend(dom_job->current_job);
+    int retval = 0;
+    virJobObjPtr suspended_job;
+    if (VIR_ALLOC_QUIET(suspended_job) < 0) {
+        return -1;
+    }
+    memcpy(&dom_job->current_job, suspended_job, sizeof(virJobObj));
+    virJobObjCleanup(&dom_job->current_job);
+    if (virJobObjInit(&dom_job->current_job) < 0) {
+        retval = -2;
+        goto error;
+    }
+    retval = virJobObjSuspend(&dom_job->current_job);
+    if (retval <= 0) {
+        retval = -3;
+        goto error;
+    }
     UNLOCK_DOM_JOB(dom_job);
     return retval;
+ error:
+    memcpy(suspended_job, &dom_job->current_job, sizeof(virJobObj));
+    VIR_FREE(suspended_job);
+    UNLOCK_DOM_JOB(dom_job);
+    return retval;
+
 }
 int
 virDomainObjResumeJob(virDomainJobObjPtr dom_job,
                           virJobID id)
 {
-    virJobObjPtr suspended_job = virJobFromId(id);
+    virJobObjPtr suspended_job = virJobFromID(id);
     if (!suspended_job) {
         return -1;
     }
+    virJobType type = virJobObjJobType(suspended_job);
     LOCK_DOM_JOB(dom_job);
-    wait_for_current_job_completion(dom_job);
-    int retval = virJobObjResumeIfNotAborted(suspended_job);
-    if (retval) {
-        dom_job->current_job = suspended_job;
+ retry:
+    if (VIR_JOB_OBJ_ACTIVE(dom_job->current_job)) {
+        if (virJobObjWait(&dom_job->current_job,
+                          &dom_job->lock,
+                          dom_job->waitLimit) < 0) {
+            goto error;
+        }
     }
+    if (type ^ dom_job->mask) {
+        if (virJobObjWait(&dom_job->async_job,
+                          &dom_job->lock,
+                          dom_job->waitLimit) < 0){
+            goto error;
+        }
+    }
+    if (VIR_JOB_OBJ_ACTIVE(dom_job->current_job) ||
+        type ^ dom_job->mask) {
+        goto retry;
+    }
+    { /*start a new scope so the compilier doesn't complain about jumping
+        over variable initialization*/
+        int retval = virJobObjResumeIfNotAborted(suspended_job);
+        if (retval) {
+            memcpy(&dom_job->current_job, suspended_job, sizeof(virJobObj));
+        }
+        UNLOCK_DOM_JOB(dom_job);
+        return retval;
+    }
+ error:
     UNLOCK_DOM_JOB(dom_job);
-    return retval;
+    return -1;
 }

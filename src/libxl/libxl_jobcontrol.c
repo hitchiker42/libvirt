@@ -1,5 +1,32 @@
+/*
+ * libxl_jobcontrol.c Implementation of the libxl job control functions
+ * Using the new job control api.
+ *
+ * Copyright (C) 2014 Tucker DiNapoli
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library.  If not, see
+ * <http://www.gnu.org/licenses/>.
+ *
+ * Author: Tucker DiNapoli
+ */
+
 #include <config.h>
+
+#include <string.h>
+
 #include "virdomjobcontrol.h"
+#include "libxl_domain.h"
 static int
 libxlDomainObjInitJob(libxlDomainObjPrivatePtr priv)
 {
@@ -21,13 +48,6 @@ libxlDomainObjResetJob(libxlDomainObjPrivatePtr priv)
 
     return;
 }
-
-static void
-libxlDomainObjFreeJob(libxlDomainObjPrivatePtr priv)
-{
-    virDomainObjJobObjFree(&priv->job);
-}
-
 
 /*
  * obj need not be locked before calling, libxlDriverPrivatePtr must NOT be locked
@@ -62,10 +82,10 @@ libxlDomainCleanupJob(libxlDriverPrivatePtr driver,
 {
     libxlDomainObjPrivatePtr priv = obj->privateData;
     virDomainJobObjPtr dom_job = &priv->jobs;
-    if (virDomainObjBeginJob(dom_job, VIR_JOB_DESTROY) < 0 ) {
+    if (virDomainObjBeginJob(dom_job, VIR_JOB_DESTROY) < 0) {
         return true;
     }
-    
+
     libxlDomainCleanup(driver, vm, reason);
 
     return virDomainObjEndJob(dom_job);

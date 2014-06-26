@@ -72,6 +72,13 @@ VIR_LOG_INIT("virjobcontrol");
 
 #define CLEAR_FLAGS_ATOMIC(job) (virAtomicIntSet(&job->flags, VIR_JOB_FLAG_NONE))
 #define CLEAR_FLAGS(job) (job->flags = VIR_JOB_FLAG_NONE)
+
+VIR_ENUM_IMPL(virJob, VIR_JOB_LAST,
+              "none",
+              "query",
+              "modify",
+              "destroy");
+
 typedef struct _jobHashEntry {
     virJobID id;
     virJobObjPtr job;
@@ -90,21 +97,26 @@ typedef struct _jobHash {
    job control needs to do anyting to use it.
 
    The other option would be to have a function:
-   virJobControlInit(void){
+   virJobControlInit(void)
+   {
      return virOnce(job_once, jobControlInit);
    }
    and require anyone using job control to call it.
  */
-static struct _jobHash job_hash[];
-static int init_err=0;
+static struct _jobHash *job_hash;
+static int init_err = 0;
 static virOnceControl job_once = VIR_ONCE_CONTROL_INITIALIZER;
 static void
-jobControlInit(void){
+jobControlInit(void)
+{
     if (virRWLockInit(&job_hash->lock) < 0) {
-        init_err=1;
+        init_err = 1;
+    }
+    if (VIR_ALLOC_QUIET(job_hash) <0) {
+        init_err = 1;
     }
     if (VIR_ALLOC_N_QUIET(job_hash->table, 16) <0) {
-        init_err=1;
+        init_err = 1;
     }
 }
 
@@ -571,27 +583,37 @@ virJobObjActive(virJobObjPtr job)
 {
     return CHECK_FLAG_ATOMIC(job, ACTIVE);
 }
+virJobType
+virJobObjJobType(virJobObjPtr job)
+{
+    return virAtomicIntGet(&job->type);
+}
+void
+virJobObjSetJobType(virJobObjPtr job, virJobType type)
+{
+    return virAtomicIntSet(&job->type, type);
+}
 void
 virJobObjChangeOwner(virJobObjPtr job, unsigned long long id)
 {
     /* can't do atomic operations on types bigger than an int */
     LOCK_JOB(job);
-    job->owner=id;
+    job->owner = id;
     UNLOCK_JOB(job);
 }
 
-#define INVALID_FLAG(x) ((x & (x-1) || (x <= VIR_JOB_FLAG_MAX))
+#define INVALID_FLAG(x) (x & (x-1) || (x <= VIR_JOB_FLAG_MAX))
 
 int
 virJobObjSetPrivateFlag(virJobObjPtr job, int flag)
 {
-    if (INVALID_FLAG(x)) {
+    if (INVALID_FLAG(flag)) {
         return -1;
     }
     /* can't use atomic operations here without using
        compare and swap, so just lock for simplicity */
     LOCK_JOB(job);
-    int prev_flags = job->flag;
+    int prev_flags = job->flags;
     bool retval = (prev_flags == (SET_FLAG_BY_VALUE(job, flag)));
     UNLOCK_JOB(job);
     return retval;
@@ -599,21 +621,21 @@ virJobObjSetPrivateFlag(virJobObjPtr job, int flag)
 int
 virJobObjUnsetPrivateFlag(virJobObjPtr job, int flag)
 {
-    if (INVALID_FLAG(x)) {
+    if (INVALID_FLAG(flag)) {
         return -1;
     }
     /* can't use atomic operations here without using
        compare and swap, so just lock for simplicity */
     LOCK_JOB(job);
-    int prev_flags = job->flag;
+    int prev_flags = job->flags;
     bool retval = (prev_flags == (UNSET_FLAG_BY_VALUE(job, flag)));
     UNLOCK_JOB(job);
     return retval;
 }
 int
-virJobObjSetPrivateFlag(virJobObjPtr job, int flag)
+virJobObjCheckPrivateFlag(virJobObjPtr job, int flag)
 {
-    if (INVALID_FLAG(x)) {
+    if (INVALID_FLAG(flag)) {
         return -1;
     }
     return CHECK_FLAG_BY_VALUE_ATOMIC(job, flag);
@@ -827,18 +849,23 @@ virJobObjUpdateInfo(virJobObjPtr job,
     UNLOCK_JOB_INFO(job);
     return job->id;
 }
-#endif
 
+
+#define LOCK_JOBS(jobs) (virMutexLock(&jobs->lock))
+#define UNLOCK_JOBS(jobs) (virMutexUnlock(&jobs->lock))
 static int
 virJobIDArrayInit(virJobIDArray *arr, int size)
 {
     if (VIR_ALLOC_N_QUIET(arr->ids, size) < 0) {
         return -1;
     }
-    arr->size=size;
-    arr->active=0;
+    arr->size = size;
+    arr->active = 0;
     return 1;
 }
+/* static int */
+/* virJobIDArrayGrow(virJobIDArray *arr, int size) */
+/* { */
 /* managing multiple jobs */
 int
 virJobControlObjInit(virJobControlObjPtr jobs)
@@ -858,13 +885,13 @@ virJobControlObjInit(virJobControlObjPtr jobs)
     if (virJobIDArrayInit(&jobs->finished, 10) < 0) {
         goto error;
     }
-    if (virMutexInit(jobs->lock) < 0 ) {
+    if (virMutexInit(jobs->lock) < 0) {
         goto error;
     }
     jobs->jobs_size = jobs->running_size =
         jobs->suspended_size = jobs->finished_size = 10;
     return 1;
-    
+
  error:
     VIR_FREE(jobs->active.ids);
     VIR_FREE(jobs->running.ids);
@@ -873,7 +900,14 @@ virJobControlObjInit(virJobControlObjPtr jobs)
     VIR_FREE(jobs);
     return -1;
 }
-int
-virJobControlStartNewJob(virJobControlObjPtr jobs)
-{
-    
+/* static virJobID */
+/* get_new_job(virJobControlObjPtr jobs) */
+/* { */
+/*     LOCK_JOBS(jobs); */
+/*     if (jobs->active.size <= jobs->active.active) { */
+
+/* int */
+/* virJobControlStartNewJob(virJobControlObjPtr jobs) */
+/* { */
+
+#endif
