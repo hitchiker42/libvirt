@@ -43,19 +43,57 @@
    the implmentation of the virJobObj struct is in this file just in
    case there is some reason it is needed, but it shouldn't be.
 */
-/* The general type of the job, currently there are three possible values
-   read only access, VIR_JOB_QUERY
-   read-write access, VIR_JOB_MODIFY
-   deletion, VIR_JOB_DESTROY*/
+
+/*
+  Explaination of job types:
+  Query: read only access of object (allows other query/atomic modify jobs)
+  Query Unsafe: read only, but ignores other jobs, so it might get inaccurate
+  information
+  Modify: Generic exclusive read/write access to object, only other jobs allowed
+  are query unsafe or force destroy
+  Modify Atomic: May change the object, but all changes will be done atomically,
+  query jobs and other atomic modify jobs are allowed
+  Modify Exclusive: Requires exclusive access to object, only other job that can be
+  run concurrently is force destroy
+  Destroy: Destroy object, waits untill all other jobs (other than query unsafe)
+  have finished running
+  Force Destroy: Destroy object regardless of other jobs running, takes precidence
+  over any other job type
+*/
+/* force destroy doesn't need a bit, because it can always run */
+static unsigned int virJobTypeMasks[7] =
+{0, 0x1 & 0x2 & 0x8, ~0x10, 0x2, 0, 0x2};
 typedef enum {
-    VIR_JOB_NONE     = 0, /*no job running*/
-    VIR_JOB_QUERY    = 0x1, /* job will not change domain state (read-only)*/
-    VIR_JOB_MODIFY   = 0x2, /* job may change domain state (read-write)*/
-    VIR_JOB_DESTROY  = 0x4, /* job will destroy the domain/storage/object it is acting on */
-    VIR_JOB_LAST = 4 /*needs to be explicitly set for VIR_ENUM_IMPL to work*/
+    VIR_JOB_NONE = 0, /* jobs that can be started while this type is running */
+
+    VIR_JOB_QUERY, /* query, query_unsafe, modify_atomic, force_destroy */
+    VIR_JOB_QUERY_UNSAFE, /* all but modify exclusive */
+
+    VIR_JOB_MODIFY, /* query unsafe and force destroy */
+    VIR_JOB_MODIFY_ATOMIC, /* query(unsafe), modify atomic, force destroy*/
+    VIR_JOB_MODIFY_EXCLUSIVE, /* force destroy */
+
+    VIR_JOB_DESTROY, /* query unsafe */
+    VIR_JOB_FORCE_DESTROY, /* none */
+
+    VIR_JOB_LAST
 } virJobType;
-const char *virJobTypeToString(int type);
-int virJobTypeFromString(const char *type);
+
+const char *virJobTypeToString(int status);
+/* Defined as bits so that the abort flag can be set along with
+   another flag
+*/
+typedef enum {
+    VIR_JOB_STATUS_IDLE = 0,
+    VIR_JOB_STATUS_ACTIVE = 0x1,
+    VIR_JOB_STATUS_SUSPENDED = 0x2,
+    VIR_JOB_STATUS_COMPLETED = 0x4,
+    VIR_JOB_STATUS_FAILED = 0x8,
+    VIR_JOB_STATUS_ABORTED = 0x10,
+    VIR_JOB_STATUS_LAST
+} virJobStatus;
+const char *virJobStatusToString(int status);
+
 /* General metadata/flags for jobs
 
    more specific flags can be added for speciic drivers,
@@ -66,23 +104,8 @@ int virJobTypeFromString(const char *type);
 */
 typedef enum {
     VIR_JOB_FLAG_NONE          = 0x000, /* No job is active */
-    VIR_JOB_FLAG_ACTIVE        = 0x001, /* Job is active */
-    /* These next flags are used to indicate how progress should be measured */
-    VIR_JOB_FLAG_TIME_BOUND    = 0x002, /* Job is bound by a specific ammount of time */
-    VIR_JOB_FLAG_MEM_BOUND     = 0x004, /* Job is bound by a specific ammount of memory */
-    VIR_JOB_FLAG_FILE_BOUND    = 0x008, /* Job is bound by a specific number of files */
-    VIR_JOB_FLAG_DATA_BOUND    = 0x010, /* Job is bound by a specific ammount of data */
-    VIR_JOB_FLAG_UNBOUNDED     = 0x020, /* Job has no specific bound */
-    VIR_JOB_FLAG_SUSPENDED     = 0x040, /* Job is Suspended and can be resumed   */
-    VIR_JOB_FLAG_COMPLETED     = 0x080, /* Job has finished, but isn't cleaned up */
-    VIR_JOB_FLAG_FAILED        = 0x100, /* Job hit error, but isn't cleaned up */
-    VIR_JOB_FLAG_ABORTED       = 0x200, /* Job was aborted, but isn't cleaned up */
-    VIR_JOB_FLAG_MAX           = 0x200, /* Keep set to the largest enum value */
-    VIR_JOB_FLAG_LAST          = 11 /* set to the number of enum values */
+    VIR_JOB_FLAG_MAX           = 0x001, /* Keep set to the largest enum value */
 } virJobFlag;
-
-const char *virJobFlagToString(virJobType type);
-int virJobFromString(const char *type);
 
 typedef int virJobID; /*signed so negitive values can be returned on error*/
 typedef struct _virJobObj virJobObj;
@@ -104,7 +127,8 @@ struct _virJobObj {
        about the job should be obtained by functions */
     virJobInfoPtr info;
     virJobID id; /* the job id, constant, and unique */
-    virJobFlag flags; /* The current state of the job */
+    virJobStatus status; /* The current state of the job */
+    virJobFlag flags;  /* extra information about the job */
     void *privateData;
 };
 #if 0
@@ -166,12 +190,13 @@ struct _virJobInfo {
 struct virJobIDArray {
     virJobID *ids;
     int size;
-    int active;
+    int used;
 };
 /* this is an idea for a way of managing an arbitrary number of jobs */
 struct _virJobControlObj {
-    virJobObj *jobs;
-    virJobIDArray active; /* keeps track of the above array of jobs */
+    virJobIDArray alive; /* keeps track of all jobs being used by this object */
+    /* these next three are for convience (and may be removed) since the information
+     they contained can be checked by calling the equivalent function*/
     virJobIDArray running;
     virJobIDArray suspended;
     virJobIDArray finished;
@@ -388,6 +413,13 @@ virJobType virJobObjJobType(virJobObjPtr job);
  */
 /* Should this return an error if job isn't active*/
 void virJobObjSetJobType(virJobObjPtr job, virJobType type);
+/**
+ * virJobObjJobStatus:
+ * @job: The job to get the status of
+ *
+ * returns the status of job.
+ */
+virJobStatus virJobObjJobStatus(virJobObjPtr job);
 /**
  * virJobObjSetMaxWaiters:
  * @job: The job to modify

@@ -46,11 +46,21 @@ VIR_LOG_INIT("virjobcontrol");
     virMutexLock(&job->info->lock)
 #define UNLOCK_JOB_INFO(job)                    \
     virMutexUnlock(&job->info->lock)
+#define LOCK_JOB_CONTROL(jobs)                  \
+    virMutexLock(&jobs->lock)
+#define UNLOCK_JOB_CONTROL(jobs)                  \
+    virMutexUnlock(&jobs->lock)
 #define GET_CURRENT_TIME(time)                  \
     if (virTimeMillisNow(&time) < 0) {          \
         return -1;                              \
     }
 
+#define CHECK_STATUS_ATOMIC(job, type) (virAtomicIntGet(&job->status) & VIR_JOB_STATUS_##type)
+#define CHECK_STATUS(job, type) (job->status & VIR_JOB_STATUS_##type)
+#define SET_STATUS_ATOMIC(job, type) (virAtomicIntOr(&job->status, VIR_JOB_STATUS_##type))
+#define SET_STATUS(job, type) (job->status |= VIR_JOB_STATUS_##type)
+#define UNSET_STATUS_ATOMIC(job, type) (virAtomicIntAnd(&job->status, (~VIR_JOB_STATUS_##type)))
+#define UNSET_STATUS(job, type) (job->status &= (~VIR_JOB_STATUS_##type))
 
 #define CHECK_FLAG_ATOMIC(job, flag) (virAtomicIntGet(&job->flags) & VIR_JOB_FLAG_##flag)
 #define CHECK_FLAG(job, flag) (job->flags & VIR_JOB_FLAG_##flag)
@@ -73,11 +83,18 @@ VIR_LOG_INIT("virjobcontrol");
 #define CLEAR_FLAGS_ATOMIC(job) (virAtomicIntSet(&job->flags, VIR_JOB_FLAG_NONE))
 #define CLEAR_FLAGS(job) (job->flags = VIR_JOB_FLAG_NONE)
 
-VIR_ENUM_IMPL(virJob, VIR_JOB_LAST,
-              "none",
-              "query",
-              "modify",
-              "destroy");
+static const char *const virJobTypeStrings[5] =
+{"none", "query", "modify", "", "destroy"}
+
+static const char *const virJobStatusStrings[16] = 
+{"idle", "active", "suspended", "", "completed", "", "", "", "failed",
+ "", "", "", "", "", "", "", "aborted"};
+const char *virJobTypeToString(int type) {
+    return virEnumToString(virJobTypeStrings, 5, type);
+}
+const char *virJobStatusToString(int type) {
+    return virEnumToString(virJobStatusStrings, 16, type);
+}
 
 typedef struct _jobHashEntry {
     virJobID id;
@@ -392,12 +409,11 @@ int
 virJobObjBegin(virJobObjPtr job,
                virJobType type)
 {
-    LOCK_JOB(job);
-    if (CHECK_FLAG(job, ACTIVE)) {
+    if (VIR_JOB_OBJ_ACTIVE(job)) {
         VIR_DEBUG("Job %d is already running", job->id);
-        UNLOCK_JOB(job);
         return 0;
     }
+    LOCK_JOB(job);
     VIR_DEBUG("Starting job %d with type %s",
               job->id, virJobTypeToString(type));
     /*This should ultimately do more then this */
@@ -409,7 +425,7 @@ virJobObjBegin(virJobObjPtr job,
         goto error;
     }
     job->type = type;
-    SET_FLAG(job, ACTIVE);
+    SET_STATUS(job, ACTIVE);
     job->start = now;
     job->owner = virThreadSelfID();
     return job->id;
@@ -421,7 +437,7 @@ virJobObjBegin(virJobObjPtr job,
 int
 virJobObjEnd(virJobObjPtr job)
 {
-    if (job->type == VIR_JOB_NONE) {
+    if (job->type == VIR_JOB_IDLE) {
         return -1;
     }
     virJobObjReset(job);
@@ -436,6 +452,7 @@ virJobObjReset(virJobObjPtr job)
     LOCK_JOB(job);
     job->type = VIR_JOB_NONE;
     job->flags = VIR_JOB_FLAG_NONE;
+    job->status = VIR_JOB_STATUS_IDLE;
     job->owner = 0;
     /*should clear the number of waiters?*/
     job->jobsWaiting = 0;
@@ -464,8 +481,8 @@ virJobObjAbortAndSignal(virJobObjPtr job)
 {
     int retval;
     LOCK_JOB(job);
-    if (CHECK_FLAG(job, ACTIVE) || CHECK_FLAG(job, SUSPENDED)) {
-        SET_FLAG(job, ABORTED);
+    if (CHECK_STATUS(job, ACTIVE) || CHECK_STATUS(job, SUSPENDED)) {
+        SET_STATUS(job, ABORTED);
         retval = job->id;
         virCondBroadcast(&job->cond);
     } else {
@@ -484,7 +501,7 @@ virJobObjWait(virJobObjPtr job,
 
     bool job_lock = false;
     int retval;
-    if (CHECK_FLAG_ATOMIC(job, ACTIVE)) { /* if the job isn't active we're fine*/
+    if (VIR_JOB_OBJ_ACTIVE(job)) { /* if the job isn't active we're fine*/
         if (virAtomicIntInc(&job->jobsWaiting) > job->maxJobsWaiting) {
             errno = 0;
             goto error;
@@ -494,7 +511,7 @@ virJobObjWait(virJobObjPtr job,
             lock = &job->lock;
             job_lock = true;
         }
-        while (CHECK_FLAG_ATOMIC(job, ACTIVE)) {
+        while (CHECK_STATUS_ATOMIC(job, ACTIVE)) {
             if (limit) {
                retval = virCondWaitUntil(&job->cond, lock, limit);
             } else {
@@ -528,24 +545,24 @@ virJobObjWait(virJobObjPtr job,
 int
 virJobObjSuspend(virJobObjPtr job)
 {
-    if (!CHECK_FLAG_ATOMIC(job, ACTIVE)) {
+    if (!VIR_JOB_OBJ_ACTIVE(job)) {
         return -1;
     }
     LOCK_JOB(job);
-    SET_FLAG(job, SUSPENDED);
-    UNSET_FLAG(job, ACTIVE);
+    SET_STATUS(job, SUSPENDED);
+    UNSET_STATUS(job, ACTIVE);
     UNLOCK_JOB(job);
     return job->id;
 }
 int
 virJobObjResume(virJobObjPtr job)
 {
-    if (!CHECK_FLAG_ATOMIC(job, SUSPENDED)) {
+    if (!CHECK_STATUS_ATOMIC(job, SUSPENDED)) {
         return -1;
     }
     LOCK_JOB(job);
-    UNSET_FLAG(job, SUSPENDED);
-    SET_FLAG(job, ACTIVE);
+    UNSET_STATUS(job, SUSPENDED);
+    SET_STATUS(job, ACTIVE);
     UNLOCK_JOB(job);
     return job->id;
 }
@@ -554,13 +571,13 @@ virJobObjResumeIfNotAborted(virJobObjPtr job)
 {
     int retval;
     LOCK_JOB(job);
-    if (!CHECK_FLAG(job, SUSPENDED)) {
+    if (!CHECK_STATUS(job, SUSPENDED)) {
         retval = -1;
-    } else if (CHECK_FLAG(job, ABORTED)) {
+    } else if (CHECK_STATUS(job, ABORTED)) {
         retval = 0;
     } else {
-        UNSET_FLAG(job, SUSPENDED);
-        SET_FLAG(job, ACTIVE);
+        UNSET_STATUS(job, SUSPENDED);
+        SET_STATUS(job, ACTIVE);
         retval = job->id;
     }
     UNLOCK_JOB(job);
@@ -576,12 +593,12 @@ virJobObjSetMaxWaiters(virJobObjPtr job, int max)
 bool
 virJobObjCheckAbort(virJobObjPtr job)
 {
-    return CHECK_FLAG_ATOMIC(job, ABORTED);
+    return CHECK_STATUS_ATOMIC(job, ABORTED);
 }
 bool
 virJobObjActive(virJobObjPtr job)
 {
-    return CHECK_FLAG_ATOMIC(job, ACTIVE);
+    return CHECK_STATUS_ATOMIC(job, ACTIVE);
 }
 virJobType
 virJobObjJobType(virJobObjPtr job)
@@ -601,6 +618,12 @@ virJobObjChangeOwner(virJobObjPtr job, unsigned long long id)
     job->owner = id;
     UNLOCK_JOB(job);
 }
+virJobStatus
+virJobObjJobStatus(virJobObjPtr job)
+{
+    return (virAtomicIntGet(job->status) & (~VIR_JOB_STATUS_ABORTED));
+}
+    
 
 #define INVALID_FLAG(x) (x & (x-1) || (x <= VIR_JOB_FLAG_MAX))
 
@@ -644,11 +667,12 @@ virJobObjCheckPrivateFlag(virJobObjPtr job, int flag)
 
 /* since we need to be able to return a negitive answer on error
    the time difference we can return is somewhat limited, but
-   not in any significant way*/
+   not in any significant way
+*/
 long long
 virJobObjCheckTime(virJobObjPtr job)
 {
-    if (!CHECK_FLAG(job, ACTIVE)) {
+    if (!VIR_JOB_OBJ_ACTIVE(job)) {
         return 0;
     }
     unsigned long long now;
@@ -853,6 +877,20 @@ virJobObjUpdateInfo(virJobObjPtr job,
 
 #define LOCK_JOBS(jobs) (virMutexLock(&jobs->lock))
 #define UNLOCK_JOBS(jobs) (virMutexUnlock(&jobs->lock))
+
+static inline int
+virJobIDArrayExists(virJobIDArray *arr, virJobID id)
+{
+    int ind;
+    for (ind = 0; ind < arr->used; ind++) {
+        if (arr->ids[ind] == id) {
+            return ind;
+        }
+    }
+    return -1;
+}
+    
+
 static int
 virJobIDArrayInit(virJobIDArray *arr, int size)
 {
@@ -860,20 +898,89 @@ virJobIDArrayInit(virJobIDArray *arr, int size)
         return -1;
     }
     arr->size = size;
-    arr->active = 0;
+    arr->used = 0;
     return 1;
 }
+static int
+virJobIDArrayCleanup(virJobIDArray *arr)
+{
+    VIR_FREE(arr->ids);
+}
+static int
+virJobIDArrayAdd(virJobIDArray *arr, virJobID id)
+{
+    if (arr->used >= arr->size) {
+        if (VIR_REALLOC_N_QUIET(arr->ids, arr->size*2) < 0) {
+            return -1;
+        }
+    }
+    arr->ids[arr->used++] = id;
+    return 1;
+}
+
+/* This assumes that in general it will be the latest job added
+   that is being removed and/or that the job id array is fairly small,
+   if not a linked list might be faster.
+*/
+static int
+virJobIDArrayRemove(virJobIDArray *arr, virJobID id)
+{
+    int ind;
+    if ((ind = virJobIDArrayExists(arr, id)) < 0){
+        return -1;
+    }
+    arr->used--;
+    while (ind < arr->used) {
+        arr->ids[ind] = arr->ids[ind+1];
+        ind++;
+    }
+    return 1;
+}
+
+static int
+virJobIDArrayFreeJobs(virJobIDArray *arr)
+{
+    int ind,retval=0;
+    virJobObjPtr job;
+    for (ind=0; ind < arr->used; ind++) {
+        if (!(job = jobFromIDInternal(arr->ids[ind]))) {
+            /* keep track of non errors, but keep going */
+            retval++;
+            continue;
+        }
+        virJobObjFree(job);
+    }
+    return retval;
+}
+
+        
+
+#define xalloc(x)                               \
+    if (VIR_ALLOC_QUIET(x) < 0) {               \
+        goto error;                             \
+    }
+#define xalloc_n(x, n)                            \
+    if (VIR_ALLOC_N_QUIET(x, n) < 0) {            \
+        goto error;                               \
+    }
+
 /* static int */
 /* virJobIDArrayGrow(virJobIDArray *arr, int size) */
 /* { */
 /* managing multiple jobs */
+
+/* The virJobObjs allocated in this function can be reached by calling
+   virJobFromID, so this doesn't leak memory, even though at first glance
+   it seems to.
+*/
+/* TODO: Remove hardcoded initial size of 10 (probably) */
 int
 virJobControlObjInit(virJobControlObjPtr jobs)
 {
     if (VIR_ALLOC_QUIET(jobs) < 0) {
         return -1;
     }
-    if (virJobIDArrayInit(&jobs->active, 10) < 0) {
+    if (virJobIDArrayInit(&jobs->alive, 10) < 0) {
         goto error;
     }
     if (virJobIDArrayInit(&jobs->running, 10) < 0) {
@@ -888,11 +995,10 @@ virJobControlObjInit(virJobControlObjPtr jobs)
     if (virMutexInit(jobs->lock) < 0) {
         goto error;
     }
-    jobs->jobs_size = jobs->running_size =
-        jobs->suspended_size = jobs->finished_size = 10;
     return 1;
 
  error:
+    VIR_FREE(job_objects);
     VIR_FREE(jobs->active.ids);
     VIR_FREE(jobs->running.ids);
     VIR_FREE(jobs->suspended.ids);
@@ -900,6 +1006,82 @@ virJobControlObjInit(virJobControlObjPtr jobs)
     VIR_FREE(jobs);
     return -1;
 }
+void
+virJobControlObjCleanup(virJobControlObjPtr jobs)
+{
+    virMutexDestroy(jobs->lock);
+    virJobIDArrayCleanup(&jobs->alive);
+    virJobIDArrayCleanup(&jobs->running);
+    virJobIDArrayCleanup(&jobs->suspended);
+    virJobIDArrayCleanup(&jobs->finished);
+    memset(jobs, '\0', sizeof(virJobControlObj));
+    return;
+}
+void
+virJobControlObjFree(virJobControlObjPtr jobs)
+{
+    virMutexDestroy(jobs->lock);
+    virJobIDArrayCleanup(&jobs->alive);
+    virJobIDArrayCleanup(&jobs->running);
+    virJobIDArrayCleanup(&jobs->suspended);
+    virJobIDArrayCleanup(&jobs->finished);
+    VIR_FREE(jobs);
+    return;
+}
+virJobID
+virJobControlBeginNewJob(virJobControlObjPtr jobs,
+                         virJobType type)
+{
+    virJobID id;
+    virJobObjPtr job;
+    if (VIR_ALLOC_QUIET(job) < 0) {
+        goto error;
+    }
+    if ((id = virJobObjInit(job)) <= 0) {
+        goto error;
+    }
+    LOCK_JOB_CONTROL(jobs);
+    
+    virJobControlWaitUntilJobAllowed(jobs, type);
+    if (virJobIDArrayAdd(&jobs->alive, id) <= 0) {
+        goto cleanup;
+    }
+    if (virJobObjBegin(job, type) <= 0) {
+        goto cleanup;
+    }
+
+    if (type == VIR_JOB_QUERY) {
+        
+    UNLOCK_JOB_CONTROL(jobs);
+    return id;
+ cleanup:
+    UNLOCK_JOB_CONTROL(jobs);
+ error:
+    VIR_FREE(job);
+    return -1;
+}
+
+int
+virJobControlSuspendJob(virJobControlObjPtr jobs, virJobID id)
+{
+    virJobObjPtr job;
+    if (!(job = jobFromIDInternal(id))) {
+        return -1;
+    }
+    if (virJobObjSuspend(job) <= 0) {
+        return -1;
+    }
+    LOCK_JOB_CONTROL(jobs);
+    if((virJobIDArrayRemove(&jobs->active, id) < 0) ||
+       (virJobIDArrayAdd(&jobs->suspended, id) < 0)){
+        UNLOCK_JOB_CONTROL(jobs);
+        return -1;
+    }
+
+    UNLOCK_JOB_CONTROL(jobs);
+    return id;
+}
+
 /* static virJobID */
 /* get_new_job(virJobControlObjPtr jobs) */
 /* { */
